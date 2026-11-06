@@ -8,6 +8,32 @@ unchanged), **major** = breaking.
 
 ---
 
+## 2026-11-06 — Catalog sync from lx-audiolabs-dev (AURA 0.14.1)
+
+Pulled shipping-plugin updates from the internal catalog. Stack stays crates.io.
+Mensor / Loom / Ember / Nimbus stay internal.
+
+### Alle Plugins (shared)
+
+- AURA **0.12.0 → 0.14.1**, Slint **1.17.1 → 1.18.1**, baseview **0.3.4**
+- Editor backend: FemtoVG/OpenGL → **FemtoVG/wgpu**
+- CLAP entry: `aura::export!` → `aura::export_clap!`
+- RT: no heap in process, EQ coeff cache, identity off-bands, automatable
+  soft-bypass (no CLAP `IS_BYPASS`)
+- UI: Flickable `content-height`; version strings sourced at runtime
+
+### Version bumps
+
+| Plugin        | From   | To     | Kind  |
+|---------------|--------|--------|-------|
+| Aether        | 1.4.2  | 1.4.7  | patch |
+| Equilibrium   | 1.8.2  | 1.8.7  | patch |
+| Meridian      | 1.11.2 | 1.11.7 | patch |
+| Lucent        | 1.2.2  | 1.2.7  | patch |
+| Lucent Relay  | 1.1.3  | 1.1.6  | patch |
+
+---
+
 ## 2026-08-08 — AURA product cutover (host smoke)
 
 Merged 2026-08-09. Framework path deps → sibling `AURA` repo. Shared stack:

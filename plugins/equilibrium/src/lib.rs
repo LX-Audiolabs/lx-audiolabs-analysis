@@ -247,6 +247,7 @@ pub struct EquilibriumParams {
     pub listen_active: BoolParam,
     #[param(id = 26, name = "Auto Loudness", default = 0, group = "Monitor")]
     pub auto_gain_active: BoolParam,
+    // Soft-bypass only (pre-IS_BYPASS). Host hard-bypass fights UI.
     #[param(id = 27, name = "Bypass", default = 0, group = "Monitor")]
     pub bypass_active: BoolParam,
 
@@ -346,6 +347,11 @@ pub struct EquilibriumDspState {
     // Cached parameters (dirty-flag optimization)
     pub(crate) cached_mono_floor_freq: f32,
     pub(crate) cached_sample_rate: f32,
+    pub(crate) pre_master_gain_target: f32,
+    pub(crate) in0: Vec<f32>,
+    pub(crate) in1: Vec<f32>,
+    pub(crate) out0: Vec<f32>,
+    pub(crate) out1: Vec<f32>,
 }
 
 impl Default for EquilibriumDspState {
@@ -400,6 +406,11 @@ impl EquilibriumDspState {
             snap_fft: SnapFFT::new(),
             cached_mono_floor_freq: -999.0,
             cached_sample_rate: -999.0,
+            pre_master_gain_target: 1.0,
+            in0: Vec::new(),
+            in1: Vec::new(),
+            out0: Vec::new(),
+            out1: Vec::new(),
         }
     }
 }
@@ -438,15 +449,18 @@ impl PluginLogic for Equilibrium {
 
     fn reset(state: &mut EquilibriumDspState, params: &EquilibriumParams, config: &AudioConfig) {
         let sr = config.sample_rate as f32;
+        if (state.cached_sample_rate - sr).abs() > 0.5 {
+            state.auto_loud_in = AutoLoudMeter::new(sr);
+            state.auto_loud_out = AutoLoudMeter::new(sr);
+        } else {
+            state.auto_loud_in.reset();
+            state.auto_loud_out.reset();
+        }
         state.cached_sample_rate = sr;
 
-        // Recreate Auto-Loud meters at host sample rate
-        state.auto_loud_in = AutoLoudMeter::new(sr);
-        state.auto_loud_out = AutoLoudMeter::new(sr);
-
         // DC/infrasonic protection HP @ 8 Hz
-        state.low_cut_l.set_butterworth_hp(2.0, sr);
-        state.low_cut_r.set_butterworth_hp(2.0, sr);
+        state.low_cut_l.set_butterworth_hp(8.0, sr);
+        state.low_cut_r.set_butterworth_hp(8.0, sr);
 
         // LP @ 35 kHz only at ≥ 88.2 kHz
         if sr >= 88_200.0 {
@@ -494,6 +508,13 @@ impl PluginLogic for Equilibrium {
         state.xo_highmid_high_r.reset();
         state.mono_floor_filter.reset();
 
+        state.in0.resize(4096, 0.0);
+        state.in1.resize(4096, 0.0);
+        state.out0.resize(4096, 0.0);
+        state.out1.resize(4096, 0.0);
+        state.pre_master_gain = 1.0;
+        state.pre_master_gain_target = 1.0;
+
         params
             .shared
             .sample_rate
@@ -515,7 +536,7 @@ impl PluginLogic for Equilibrium {
 }
 
 #[cfg(feature = "clap")]
-aura::export!(Equilibrium);
+aura::export_clap!(Equilibrium);
 
 #[cfg(feature = "vst3")]
 aura::export_vst3!(Equilibrium);
@@ -530,5 +551,54 @@ mod tests {
     #[test]
     fn state_round_trips() {
         aura_test::assert_state_round_trip::<Equilibrium>();
+    }
+
+    #[test]
+    fn process_2048_is_finite() {
+        let frames = 2048;
+        let out = aura_test::process_with_input::<Equilibrium>(
+            &[vec![0.25; frames], vec![-0.25; frames]],
+            frames,
+        );
+        aura_test::assert_no_nans(&out);
+    }
+
+    #[test]
+    fn bypass_param_is_soft_only() {
+        let p = EquilibriumParams::default();
+        let info = p
+            .param_infos()
+            .into_iter()
+            .find(|i| i.id == 27)
+            .expect("bypass id 27");
+        assert!(!info.flags.contains(ParamFlags::IS_BYPASS));
+        assert!(info.flags.contains(ParamFlags::AUTOMATABLE));
+    }
+
+    #[test]
+    fn bypass_is_true_dry() {
+        let params = EquilibriumParams::default();
+        params.bypass_active.set_value(true);
+        let frames = 128;
+        let out = {
+            let sample_rate = 48_000.0;
+            let mut state = Equilibrium::init(&params, sample_rate);
+            let config = AudioConfig::new(sample_rate, frames).with_channels(2, 2);
+            Equilibrium::reset(&mut state, &params, &config);
+            let owned_in = [vec![0.25f32; frames], vec![-0.25f32; frames]];
+            let mut owned_out = [vec![0.0f32; frames], vec![0.0f32; frames]];
+            let in_refs: Vec<&[f32]> = owned_in.iter().map(Vec::as_slice).collect();
+            let mut out_refs: Vec<&mut [f32]> =
+                owned_out.iter_mut().map(Vec::as_mut_slice).collect();
+            let mut buffer = AudioBuffer::from_slices_checked(&in_refs, &mut out_refs, frames);
+            let mut ctx =
+                ProcessContext::new(sample_rate, frames).with_process_mode(ProcessMode::Realtime);
+            let _ = Equilibrium::process(&mut state, &params, &mut buffer, &mut ctx);
+            owned_out
+        };
+        for i in 0..frames {
+            assert!((out[0][i] - 0.25).abs() < 1e-6);
+            assert!((out[1][i] + 0.25).abs() < 1e-6);
+        }
     }
 }

@@ -503,6 +503,9 @@ pub fn apply_profile(
     );
     ctx.automate(P::Pan, f(&params.pan, profile.pan));
     ctx.automate(P::OutputGain, f(&params.output_gain, profile.output_gain));
+    ctx.automate(P::MonoActive, 0.0);
+    ctx.automate(P::DeltaActive, 0.0);
+    ctx.automate(P::BypassActive, 0.0);
 }
 
 // ─── Scan ────────────────────────────────────────────────────────────────────

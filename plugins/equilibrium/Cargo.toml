@@ -1,6 +1,6 @@
 [package]
 name = "equilibrium"
-version = "1.8.2"
+version = "1.8.7"
 edition = "2024"
 description = "LX Audiolabs — Equilibrium"
 license = "GPL-3.0-or-later"
@@ -18,7 +18,7 @@ lv2 = ["lx-aura/lv2"]
 
 [dependencies]
 lx-aura = { workspace = true }
-lx-aura-editor = { workspace = true, features = ["backend-femtovg"] }
+lx-aura-editor = { workspace = true, features = ["backend-femtovg-wgpu"] }
 lx-aura-dsp = { workspace = true }
 lx-vault = { workspace = true }
 lx-analysis = { workspace = true }

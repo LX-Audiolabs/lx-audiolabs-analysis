@@ -16,6 +16,14 @@ use crate::{
     BAND_COUNT, EquilibriumDspState, EquilibriumParams, MINUS_INF_DB, db_to_gain, gain_to_db,
 };
 
+fn take_grow(slot: &mut Vec<f32>, n: usize) -> Vec<f32> {
+    let mut v = std::mem::take(slot);
+    if v.len() < n {
+        v.resize(n, 0.0);
+    }
+    v
+}
+
 /// Per-block control flags (param snapshot + UI modes).
 pub(crate) struct ProcessControl {
     pub sample_rate: f32,
@@ -36,9 +44,6 @@ pub(crate) struct ProcessControl {
 
 /// Accumulators from the sample loop; consumed by publish.
 pub(crate) struct BlockMetrics {
-    pub max_out_peak: f32,
-    pub max_out_peak_l: f32,
-    pub max_out_peak_r: f32,
     pub sum_power_in: f32,
     pub sum_power_out: f32,
     pub sum_power_l: f32,
@@ -76,11 +81,14 @@ fn param_update(state: &mut EquilibriumDspState, params: &EquilibriumParams) -> 
     if coef_dirty {
         state.cached_sample_rate = sample_rate;
     }
-    if (mono_maker_freq != state.cached_mono_floor_freq || coef_dirty) && mono_maker_freq > 1.0 {
+    if mono_maker_freq != state.cached_mono_floor_freq || coef_dirty {
         state.cached_mono_floor_freq = mono_maker_freq;
-        state
-            .mono_floor_filter
-            .set_butterworth_hp(mono_maker_freq, sample_rate);
+        if mono_maker_freq > 1.0 {
+            state
+                .mono_floor_filter
+                .set_butterworth_hp(mono_maker_freq, sample_rate);
+        }
+        state.mono_floor_filter.reset();
     }
 
     // Reset peak
@@ -112,19 +120,6 @@ fn param_update(state: &mut EquilibriumDspState, params: &EquilibriumParams) -> 
             state.listen_max_ema[b] = -90.0;
         }
         state.listen_sample_count = 0;
-        state.low_cut_l.reset();
-        state.low_cut_r.reset();
-        state.high_cut_l.reset();
-        state.high_cut_r.reset();
-        state.xo_bass_mid_l.reset();
-        state.xo_bass_mid_r.reset();
-        state.xo_low_bass_l.reset();
-        state.xo_low_bass_r.reset();
-        state.xo_mid_high_l.reset();
-        state.xo_mid_high_r.reset();
-        state.xo_highmid_high_l.reset();
-        state.xo_highmid_high_r.reset();
-        state.mono_floor_filter.reset();
     }
 
     let any_solo = params.solo_low.value()
@@ -211,9 +206,6 @@ fn process_block(
     let delta = ctrl.delta;
     let auto_gain = ctrl.auto_gain;
     let is_measuring = ctrl.is_measuring;
-    let mut max_out_peak = 0.0f32;
-    let mut max_out_peak_l = 0.0f32;
-    let mut max_out_peak_r = 0.0f32;
     let mut sum_power_in = 0.0f32;
     let mut sum_power_out = 0.0f32;
     let mut sum_power_l = 0.0f32;
@@ -223,17 +215,55 @@ fn process_block(
     let mut block_band_power = [0.0f32; 5];
     let mut block_input_band_power = [0.0f32; 5];
 
-    // Copy I/O — AURA buffer has separate input/output borrows (no dual-mut io()).
     let num_samples = buffer.num_samples();
-    let in0: Vec<f32> = buffer.input(0).to_vec();
-    let in1: Vec<f32> = buffer.input(1).to_vec();
-    let mut out0 = vec![0.0f32; num_samples];
-    let mut out1 = vec![0.0f32; num_samples];
-
-    // Feed input to LUFS meter BEFORE we modify the buffer
-    if is_measuring {
-        state.auto_loud_in.feed(&in0, &in1);
+    if num_samples == 0 {
+        return BlockMetrics {
+            sum_power_in: 0.0,
+            sum_power_out: 0.0,
+            sum_power_l: 0.0,
+            sum_power_r: 0.0,
+            count_samples: 0,
+            block_band_power,
+            block_input_band_power,
+            num_samples: 0,
+        };
     }
+    let mut in0 = take_grow(&mut state.in0, num_samples);
+    let mut in1 = take_grow(&mut state.in1, num_samples);
+    let mut out0 = take_grow(&mut state.out0, num_samples);
+    let mut out1 = take_grow(&mut state.out1, num_samples);
+    in0[..num_samples].copy_from_slice(buffer.input(0));
+    in1[..num_samples].copy_from_slice(buffer.input(1));
+
+    if is_measuring {
+        state
+            .auto_loud_in
+            .feed(&in0[..num_samples], &in1[..num_samples]);
+    }
+
+    let band_gains = [
+        db_to_gain(params.low_gain.value()),
+        db_to_gain(params.bass_gain.value()),
+        db_to_gain(params.mid_gain.value()),
+        db_to_gain(params.high_mid_gain.value()),
+        db_to_gain(params.high_gain.value()),
+    ];
+    let band_widths = [
+        params.low_width.value() / 100.0,
+        params.bass_width.value() / 100.0,
+        params.mid_width.value() / 100.0,
+        params.high_mid_width.value() / 100.0,
+        params.high_width.value() / 100.0,
+    ];
+    let band_pans = [
+        params.low_pan.value(),
+        params.bass_pan.value(),
+        params.mid_pan.value(),
+        params.high_mid_pan.value(),
+        params.high_pan.value(),
+    ];
+    let band_solos = [s_low, s_bass, s_mid, s_high_mid, s_high];
+    let out_gain = db_to_gain(params.output_gain.value());
 
     for i in 0..num_samples {
         count_samples += 1;
@@ -273,29 +303,6 @@ fn process_block(
 
         let mut bands_l = [band1_l, band2_l, band3_l, band4_l, band5_l];
         let mut bands_r = [band1_r, band2_r, band3_r, band4_r, band5_r];
-
-        let band_gains = [
-            db_to_gain(params.low_gain.value()),
-            db_to_gain(params.bass_gain.value()),
-            db_to_gain(params.mid_gain.value()),
-            db_to_gain(params.high_mid_gain.value()),
-            db_to_gain(params.high_gain.value()),
-        ];
-        let band_widths = [
-            params.low_width.value() / 100.0,
-            params.bass_width.value() / 100.0,
-            params.mid_width.value() / 100.0,
-            params.high_mid_width.value() / 100.0,
-            params.high_width.value() / 100.0,
-        ];
-        let band_pans = [
-            params.low_pan.value(),
-            params.bass_pan.value(),
-            params.mid_pan.value(),
-            params.high_mid_pan.value(),
-            params.high_pan.value(),
-        ];
-        let band_solos = [s_low, s_bass, s_mid, s_high_mid, s_high];
 
         for b in 0..BAND_COUNT {
             let bl = bands_l[b];
@@ -375,7 +382,6 @@ fn process_block(
             processed_r = out_r - cut_r;
         }
 
-        let out_gain = db_to_gain(params.output_gain.value());
         processed_l *= out_gain;
         processed_r *= out_gain;
 
@@ -384,7 +390,6 @@ fn process_block(
             processed_r *= state.auto_gain_comp;
         }
 
-        // Safety clamp
         processed_l = processed_l.clamp(-1.0, 1.0);
         processed_r = processed_r.clamp(-1.0, 1.0);
 
@@ -396,9 +401,6 @@ fn process_block(
             out0[i] = in_l;
             out1[i] = in_r;
         } else {
-            max_out_peak = max_out_peak.max(processed_l.abs()).max(processed_r.abs());
-            max_out_peak_l = max_out_peak_l.max(processed_l.abs());
-            max_out_peak_r = max_out_peak_r.max(processed_r.abs());
             out0[i] = processed_l;
             out1[i] = processed_r;
         }
@@ -475,13 +477,14 @@ fn process_block(
 
     ctrl.snap_phase = snap_phase;
 
-    buffer.output(0).copy_from_slice(&out0);
-    buffer.output(1).copy_from_slice(&out1);
+    buffer.output(0).copy_from_slice(&out0[..num_samples]);
+    buffer.output(1).copy_from_slice(&out1[..num_samples]);
+    state.in0 = in0;
+    state.in1 = in1;
+    state.out0 = out0;
+    state.out1 = out1;
 
     BlockMetrics {
-        max_out_peak,
-        max_out_peak_l,
-        max_out_peak_r,
         sum_power_in,
         sum_power_out,
         sum_power_l,
@@ -503,12 +506,6 @@ fn publish(
     let listen = ctrl.listen;
     let auto_gain = ctrl.auto_gain;
     let is_measuring = ctrl.is_measuring;
-    // Sample-loop peaks superseded by final-buffer metering after PRE-MASTER.
-    let _ = (
-        metrics.max_out_peak,
-        metrics.max_out_peak_l,
-        metrics.max_out_peak_r,
-    );
     let sum_power_in = metrics.sum_power_in;
     let sum_power_out = metrics.sum_power_out;
     let sum_power_l = metrics.sum_power_l;
@@ -517,11 +514,14 @@ fn publish(
     let mut block_band_power = metrics.block_band_power;
     let mut block_input_band_power = metrics.block_input_band_power;
     let num_samples = metrics.num_samples;
+    if num_samples == 0 || count_samples == 0 {
+        return;
+    }
 
-    // Copy outs for post-process (pre-master, scope, auto-loud out) — AURA
-    // buffer has separate input/output borrows (no dual-mut io()).
-    let mut out0: Vec<f32> = buffer.output(0).to_vec();
-    let mut out1: Vec<f32> = buffer.output(1).to_vec();
+    let mut out0 = take_grow(&mut state.out0, num_samples);
+    let mut out1 = take_grow(&mut state.out1, num_samples);
+    out0[..num_samples].copy_from_slice(buffer.output(0));
+    out1[..num_samples].copy_from_slice(buffer.output(1));
     // Pink noise carries equal energy per octave, so a band's total power
     // scales with its octave span — wider bands read hotter and the display
     // stair-steps upward. Divide each band's power by its octave width so a
@@ -704,8 +704,10 @@ fn publish(
         state.auto_loud_in.reset();
         state.auto_loud_out.reset();
     }
-    if is_measuring {
-        state.auto_loud_out.feed(&out0, &out1);
+    if is_measuring && !ctrl.bypass {
+        state
+            .auto_loud_out
+            .feed(&out0[..num_samples], &out1[..num_samples]);
         let target_samples = (5.0 * sample_rate as f64) as u64;
         if state.auto_loud_out.sample_count() >= target_samples {
             let in_lufs = state.auto_loud_in.loudness_db();
@@ -727,25 +729,24 @@ fn publish(
         }
     }
 
-    // PRE-MASTER (gain on final buffer; peaks published once after this)
-    if params.pre_master_active.value() {
+    // PRE-MASTER (gain on final buffer; peaks published once after this).
+    // Bypass: dry already in out0/out1 — do not apply gain.
+    if params.pre_master_active.value() && !ctrl.bypass {
         let target_linear = db_to_gain(params.pre_master_target_db.raw_target() as f32);
-        let n = out0.len().min(out1.len());
+        let n = num_samples;
         let sr_safe = if sample_rate > 0.0 {
             sample_rate
         } else {
             48_000.0
         };
-        // Peak catch window — was 200ms (too short for sparse transients).
-        // 2s ≈ safer PRE-MASTER gain; still much shorter than AUTO LOUD (5s LUFS).
         let measure_samples = (2.0 * sr_safe) as u32;
 
         if !state.pre_master_active_prev {
             state.pre_master_measure_peak = 0.0;
             state.pre_master_measure_count = 0;
             state.pre_master_gain = 1.0;
+            state.pre_master_gain_target = 1.0;
             state.pre_master_active_prev = true;
-            // Fresh holds for the new gain stage
             state.peak_hold_value = MINUS_INF_DB;
             state.peak_hold_l_value = MINUS_INF_DB;
             state.peak_hold_r_value = MINUS_INF_DB;
@@ -760,14 +761,14 @@ fn publish(
             state.pre_master_measure_count += n as u32;
         }
 
-        if state.pre_master_measure_count >= measure_samples && state.pre_master_gain == 1.0 {
+        if state.pre_master_measure_count >= measure_samples && state.pre_master_gain_target == 1.0
+        {
             let gate = db_to_gain(-50.0);
             if state.pre_master_measure_peak > gate {
                 let max_boost = db_to_gain(12.0);
                 let max_cut = db_to_gain(-24.0);
-                state.pre_master_gain =
+                state.pre_master_gain_target =
                     (target_linear / state.pre_master_measure_peak).clamp(max_cut, max_boost);
-                // Gain just engaged — drop pre-measure holds
                 state.peak_hold_value = MINUS_INF_DB;
                 state.peak_hold_l_value = MINUS_INF_DB;
                 state.peak_hold_r_value = MINUS_INF_DB;
@@ -777,6 +778,8 @@ fn publish(
             }
         }
 
+        let ramp = 1.0 - (-(n as f32) / (0.030 * sr_safe)).exp();
+        state.pre_master_gain += ramp * (state.pre_master_gain_target - state.pre_master_gain);
         for i in 0..n {
             out0[i] *= state.pre_master_gain;
             out1[i] *= state.pre_master_gain;
@@ -788,12 +791,13 @@ fn publish(
             state.peak_hold_r_value = MINUS_INF_DB;
         }
         state.pre_master_gain = 1.0;
+        state.pre_master_gain_target = 1.0;
         state.pre_master_active_prev = false;
     }
 
     // Peak meters from final output (post PRE-MASTER / bypass path)
     {
-        let n = out0.len().min(out1.len());
+        let n = num_samples;
         let mut peak = 0.0f32;
         let mut peak_l = 0.0f32;
         let mut peak_r = 0.0f32;
@@ -851,7 +855,7 @@ fn publish(
 
     // Goniometer scope buffer
     {
-        let n = out0.len().min(out1.len());
+        let n = num_samples;
         let block_peak = (0..n)
             .map(|i| out0[i].abs().max(out1[i].abs()))
             .fold(0.0f32, f32::max)
@@ -876,6 +880,8 @@ fn publish(
         }
     }
 
-    buffer.output(0).copy_from_slice(&out0);
-    buffer.output(1).copy_from_slice(&out1);
+    buffer.output(0).copy_from_slice(&out0[..num_samples]);
+    buffer.output(1).copy_from_slice(&out1[..num_samples]);
+    state.out0 = out0;
+    state.out1 = out1;
 }

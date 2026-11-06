@@ -7,6 +7,15 @@ use aura_dsp::fx::FtzDazGuard;
 
 use crate::{AetherDspState, AetherParams, CF_DELAY_MAX, NUM_BANDS};
 
+/// Steal a scratch Vec from DSP state (capacity stays), grow if the host block is bigger.
+fn take_grow(slot: &mut Vec<f32>, n: usize) -> Vec<f32> {
+    let mut v = std::mem::take(slot);
+    if v.len() < n {
+        v.resize(n, 0.0);
+    }
+    v
+}
+
 pub(crate) fn run(
     state: &mut AetherDspState,
     params: &AetherParams,
@@ -14,7 +23,7 @@ pub(crate) fn run(
 ) -> ProcessStatus {
     let _ftz = FtzDazGuard::new();
 
-    if buffer.num_inputs() < 2 {
+    if buffer.num_inputs() < 2 || buffer.num_outputs() < 2 {
         return ProcessStatus::Continue;
     }
     // ponytail: never process with empty delay (would panic on % 0)
@@ -30,12 +39,16 @@ pub(crate) fn run(
     let delay_len = state.cf_delay_l.len();
     let sr = state.sample_rate.max(1.0);
     let num_samples = buffer.num_samples();
+    if num_samples == 0 {
+        return ProcessStatus::Continue;
+    }
 
-    // Copy inputs — AURA buffer has separate input/output borrows (no dual-mut io()).
-    let in0: Vec<f32> = buffer.input(0).to_vec();
-    let in1: Vec<f32> = buffer.input(1).to_vec();
-    let mut out0 = vec![0.0f32; num_samples];
-    let mut out1 = vec![0.0f32; num_samples];
+    let mut in0 = take_grow(&mut state.in0, num_samples);
+    let mut in1 = take_grow(&mut state.in1, num_samples);
+    let mut out0 = take_grow(&mut state.out0, num_samples);
+    let mut out1 = take_grow(&mut state.out1, num_samples);
+    in0[..num_samples].copy_from_slice(buffer.input(0));
+    in1[..num_samples].copy_from_slice(buffer.input(1));
 
     let mut in_peak = 0.0f32;
     for i in 0..num_samples {
@@ -51,11 +64,28 @@ pub(crate) fn run(
         .input_peak
         .store(in_db, std::sync::atomic::Ordering::Release);
 
-    if params.bypass.value() {
-        for ch in 0..buffer.num_outputs() {
-            let src = buffer.input(ch).to_vec();
-            buffer.output(ch).copy_from_slice(&src);
+    let bypass = params.bypass.value();
+    if bypass != state.was_bypass {
+        if state.was_bypass && !bypass {
+            for b in state.eq_l.iter_mut().chain(state.eq_r.iter_mut()) {
+                b.reset();
+            }
+            state.cf_delay_l.fill(0.0);
+            state.cf_delay_r.fill(0.0);
+            state.cf_lp_l = 0.0;
+            state.cf_lp_r = 0.0;
+            state.cf_delay_pos = 0;
         }
+        state.was_bypass = bypass;
+    }
+
+    if bypass {
+        buffer.output(0).copy_from_slice(&in0[..num_samples]);
+        buffer.output(1).copy_from_slice(&in1[..num_samples]);
+        state.in0 = in0;
+        state.in1 = in1;
+        state.out0 = out0;
+        state.out1 = out1;
         return ProcessStatus::Continue;
     }
 
@@ -72,10 +102,10 @@ pub(crate) fn run(
     let cf_a = 1.0 - (-2.0 * std::f32::consts::PI * cf_fc / sr).exp();
     let max_delay = delay_len - 1;
     let delay_samples = ((itd_ms * 0.001 * sr).round() as usize).min(max_delay);
-    // Keep write head in range if state was resized mid-flight.
     if state.cf_delay_pos >= delay_len {
         state.cf_delay_pos = 0;
     }
+    let g = 10.0_f32.powf(params.gain.value() / 20.0);
 
     for i in 0..num_samples {
         let in_l = in0[i];
@@ -84,8 +114,10 @@ pub(crate) fn run(
         let mut eq_l = in_l;
         let mut eq_r = in_r;
         for b in 0..NUM_BANDS {
-            eq_l = state.eq_l[b].process(eq_l);
-            eq_r = state.eq_r[b].process(eq_r);
+            if state.eq_on[b] {
+                eq_l = state.eq_l[b].process(eq_l);
+                eq_r = state.eq_r[b].process(eq_r);
+            }
         }
         let h_l = in_l + (eq_l - in_l) * blend;
         let h_r = in_r + (eq_r - in_r) * blend;
@@ -103,14 +135,16 @@ pub(crate) fn run(
         let cf_l = h_l + state.cf_lp_l * cf_mix;
         let cf_r = h_r + state.cf_lp_r * cf_mix;
 
-        let gain_smoothed = params.gain.value();
-        let g = 10.0_f32.powf(gain_smoothed / 20.0);
         out0[i] = cf_l * g;
         out1[i] = cf_r * g;
     }
 
-    buffer.output(0).copy_from_slice(&out0);
-    buffer.output(1).copy_from_slice(&out1);
+    buffer.output(0).copy_from_slice(&out0[..num_samples]);
+    buffer.output(1).copy_from_slice(&out1[..num_samples]);
+    state.in0 = in0;
+    state.in1 = in1;
+    state.out0 = out0;
+    state.out1 = out1;
 
     ProcessStatus::Continue
 }

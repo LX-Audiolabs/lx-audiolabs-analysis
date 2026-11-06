@@ -227,6 +227,7 @@ pub struct AetherParams {
     )]
     pub gain: FloatParam,
 
+    // Soft-bypass only (1.4.3). No CLAP IS_BYPASS — host hard-bypass fights UI.
     #[param(id = 26, name = "Bypass", default = 0)]
     pub bypass: BoolParam,
 
@@ -253,11 +254,18 @@ pub struct AetherDspState {
     pub(crate) sample_rate: f32,
     pub(crate) eq_l: [Biquad; NUM_BANDS],
     pub(crate) eq_r: [Biquad; NUM_BANDS],
+    pub(crate) eq_on: [bool; NUM_BANDS],
+    pub(crate) cached_eq: [(f32, f32, f32, i32); NUM_BANDS],
     pub(crate) cf_lp_l: f32,
     pub(crate) cf_lp_r: f32,
     pub(crate) cf_delay_l: Vec<f32>,
     pub(crate) cf_delay_r: Vec<f32>,
     pub(crate) cf_delay_pos: usize,
+    pub(crate) was_bypass: bool,
+    pub(crate) in0: Vec<f32>,
+    pub(crate) in1: Vec<f32>,
+    pub(crate) out0: Vec<f32>,
+    pub(crate) out1: Vec<f32>,
 }
 
 impl Default for AetherDspState {
@@ -266,6 +274,8 @@ impl Default for AetherDspState {
             sample_rate: 48_000.0,
             eq_l: std::array::from_fn(|_| Biquad::new()),
             eq_r: std::array::from_fn(|_| Biquad::new()),
+            eq_on: [true; NUM_BANDS],
+            cached_eq: [(f32::NAN, f32::NAN, f32::NAN, -1); NUM_BANDS],
             cf_lp_l: 0.0,
             cf_lp_r: 0.0,
             // Always allocate delay lines — process must never see empty buffers
@@ -273,6 +283,11 @@ impl Default for AetherDspState {
             cf_delay_l: vec![0.0; CF_DELAY_MAX],
             cf_delay_r: vec![0.0; CF_DELAY_MAX],
             cf_delay_pos: 0,
+            was_bypass: false,
+            in0: Vec::new(),
+            in1: Vec::new(),
+            out0: Vec::new(),
+            out1: Vec::new(),
         }
     }
 }
@@ -313,18 +328,28 @@ impl AetherDspState {
             ),
         ];
         for (i, &(fc, g, q, t)) in vals.iter().enumerate() {
+            if self.cached_eq[i] == (fc, g, q, t) {
+                continue;
+            }
+            let was_on = self.eq_on[i];
             set_band(&mut self.eq_l[i], t, fc, g, q, sr);
             set_band(&mut self.eq_r[i], t, fc, g, q, sr);
+            self.eq_on[i] = t != 0;
+            if was_on && t == 0 {
+                self.eq_l[i].reset();
+                self.eq_r[i].reset();
+            }
+            self.cached_eq[i] = (fc, g, q, t);
         }
     }
 }
 
 pub fn set_band(b: &mut Biquad, type_code: i32, fc: f32, gain: f32, q: f32, sr: f32) {
     match type_code {
-        1 => b.set_low_shelf(fc, gain, q.clamp(0.3, 2.0), sr),
+        1 => b.set_low_shelf(fc, gain, q, sr),
         2 => b.set_peaking_eq(fc, gain, q, sr),
-        3 => b.set_high_shelf(fc, gain, q.clamp(0.3, 2.0), sr),
-        _ => b.set_peaking_eq(1000.0, 0.0, 0.7, sr),
+        3 => b.set_high_shelf(fc, gain, q, sr),
+        _ => b.set_identity(),
     }
 }
 
@@ -462,6 +487,11 @@ impl PluginLogic for Aether {
         state.cf_delay_l.fill(0.0);
         state.cf_delay_r.fill(0.0);
         state.cf_delay_pos = 0;
+        state.in0.resize(4096, 0.0);
+        state.in1.resize(4096, 0.0);
+        state.out0.resize(4096, 0.0);
+        state.out1.resize(4096, 0.0);
+        state.was_bypass = false;
         state.update_eq_coeffs(params);
     }
 
@@ -483,7 +513,7 @@ impl PluginLogic for Aether {
 }
 
 #[cfg(feature = "clap")]
-aura::export!(Aether);
+aura::export_clap!(Aether);
 
 #[cfg(feature = "vst3")]
 aura::export_vst3!(Aether);
@@ -508,5 +538,115 @@ mod tests {
     #[test]
     fn state_round_trips() {
         aura_test::assert_state_round_trip::<Aether>();
+    }
+
+    #[test]
+    fn off_band_is_identity() {
+        let mut b = Biquad::new();
+        set_band(&mut b, 2, 1000.0, 12.0, 4.0, 48_000.0);
+        let _ = b.process(1.0);
+        set_band(&mut b, 0, 1000.0, 0.0, 0.7, 48_000.0);
+        b.reset();
+        assert!((b.process(0.25) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn process_2048_is_finite() {
+        let frames = 2048;
+        let out = aura_test::process_with_input::<Aether>(
+            &[vec![0.25; frames], vec![-0.25; frames]],
+            frames,
+        );
+        aura_test::assert_no_nans(&out);
+    }
+
+    /// Soft-bypass must round-trip: wet → dry → wet again.
+    /// Defaults are near-transparent; crank gain so the paths differ.
+    #[test]
+    fn bypass_toggle_restores_processing() {
+        use aura::prelude::*;
+
+        let params = AetherParams::default();
+        params.gain.set_value(12.0);
+        params.cf_amount.set_value(100.0);
+
+        let frames = 256;
+        let sample_rate = 48_000.0;
+        let mut state = Aether::init(&params, sample_rate);
+        let config = AudioConfig::new(sample_rate, frames).with_channels(2, 2);
+        Aether::reset(&mut state, &params, &config);
+
+        let in_l = vec![0.25f32; frames];
+        let in_r = vec![-0.25f32; frames];
+
+        let run = |state: &mut AetherDspState, params: &AetherParams| -> (Vec<f32>, Vec<f32>) {
+            let owned_in = [in_l.clone(), in_r.clone()];
+            let mut owned_out = [vec![0.0f32; frames], vec![0.0f32; frames]];
+            let in_refs: Vec<&[f32]> = owned_in.iter().map(Vec::as_slice).collect();
+            let mut out_refs: Vec<&mut [f32]> =
+                owned_out.iter_mut().map(Vec::as_mut_slice).collect();
+            let mut buffer = AudioBuffer::from_slices_checked(&in_refs, &mut out_refs, frames);
+            let mut ctx =
+                ProcessContext::new(sample_rate, frames).with_process_mode(ProcessMode::Realtime);
+            let status = Aether::process(state, params, &mut buffer, &mut ctx);
+            assert!(matches!(
+                status,
+                ProcessStatus::Continue | ProcessStatus::TailFinished
+            ));
+            (owned_out[0].clone(), owned_out[1].clone())
+        };
+
+        params.bypass.set_value(false);
+        let (wet_l, wet_r) = run(&mut state, &params);
+
+        params.bypass.set_value(true);
+        let (dry_l, dry_r) = run(&mut state, &params);
+        for i in 0..frames {
+            assert!(
+                (dry_l[i] - in_l[i]).abs() < 1e-6 && (dry_r[i] - in_r[i]).abs() < 1e-6,
+                "bypass ON must be true dry at sample {i}"
+            );
+        }
+
+        // Wet must differ from dry with gain + crossfeed engaged.
+        let wet_differs = wet_l
+            .iter()
+            .zip(dry_l.iter())
+            .any(|(w, d)| (w - d).abs() > 1e-4)
+            || wet_r
+                .iter()
+                .zip(dry_r.iter())
+                .any(|(w, d)| (w - d).abs() > 1e-4);
+        assert!(wet_differs, "test setup needs audible wet≠dry");
+
+        params.bypass.set_value(false);
+        let (restored_l, restored_r) = run(&mut state, &params);
+        let restored_differs = restored_l
+            .iter()
+            .zip(dry_l.iter())
+            .any(|(w, d)| (w - d).abs() > 1e-4)
+            || restored_r
+                .iter()
+                .zip(dry_r.iter())
+                .any(|(w, d)| (w - d).abs() > 1e-4);
+        assert!(
+            restored_differs,
+            "bypass OFF must process again (wet≠dry); was_bypass stuck or soft path broken"
+        );
+    }
+
+    #[test]
+    fn bypass_param_is_soft_only() {
+        let p = AetherParams::default();
+        let info = p
+            .param_infos()
+            .into_iter()
+            .find(|i| i.id == 26)
+            .expect("bypass id 26");
+        assert!(
+            !info.flags.contains(ParamFlags::IS_BYPASS),
+            "1.4.3: no IS_BYPASS — host must not own this slot"
+        );
+        assert!(info.flags.contains(ParamFlags::AUTOMATABLE));
     }
 }

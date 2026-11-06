@@ -8,7 +8,7 @@ publish = false
 
 [dependencies]
 lx-aura = { workspace = true }
-lx-aura-editor = { workspace = true, features = ["backend-femtovg"] }
+lx-aura-editor = { workspace = true, features = ["backend-femtovg-wgpu"] }
 paste = "1"
 slint = { workspace = true }
 

@@ -32,7 +32,8 @@ const RESOLVE_INTERVAL_MS: u64 = 250;
 
 #[derive(Params)]
 pub struct LucentRelayParams {
-    #[param(id = 1, name = "Bypass", default = 0, flags = "bypass|hidden")]
+    // Soft-bypass only (pre-IS_BYPASS); hidden validator dummy.
+    #[param(id = 1, name = "Bypass", default = 0, flags = "hidden")]
     pub bypass: BoolParam,
     #[param(
         id = 2,
@@ -64,6 +65,13 @@ pub(crate) fn read_persisted(params: &LucentRelayParams) -> (String, String) {
     (name, target)
 }
 
+/// Non-blocking read for the audio thread. None = lock busy, skip this block.
+pub(crate) fn try_read_persisted(params: &LucentRelayParams) -> Option<(String, String)> {
+    let name = params.name.try_read().ok()?.clone();
+    let target = params.target.try_read().ok()?.clone();
+    Some((name, target))
+}
+
 pub(crate) fn sync_live(params: &LucentRelayParams) {
     let pair = read_persisted(params);
     if let Ok(mut live) = params.live.write() {
@@ -75,27 +83,12 @@ pub(crate) fn sync_live(params: &LucentRelayParams) {
 /// when the persisted target went stale. Returns the target to publish with.
 fn resolve_and_reconcile(
     hub: &RelayHub,
-    params: &LucentRelayParams,
     consumers: &mut Vec<String>,
     selected: &str,
     now_ms: u64,
 ) -> String {
     hub.read_consumers_into(now_ms, consumers);
-    let resolved = resolve_from_consumers(selected, consumers).unwrap_or_default();
-    if !selected.is_empty() && resolved != selected {
-        // persisted target went stale — write the resolution back
-        let mut changed = false;
-        if let Ok(mut t) = params.target.write()
-            && *t != resolved
-        {
-            *t = resolved.clone();
-            changed = true;
-        }
-        if changed {
-            sync_live(params);
-        }
-    }
-    resolved
+    resolve_from_consumers(selected, consumers).unwrap_or_default()
 }
 
 /// Editor tick path — claim publisher slot and refresh heartbeat without transport.
@@ -126,7 +119,7 @@ pub(crate) fn editor_publish_heartbeat(params: &LucentRelayParams) {
     let target = CONSUMERS_SCRATCH.with(|scratch| {
         let mut cons = scratch.borrow_mut();
         cons.clear();
-        resolve_and_reconcile(hub, params, &mut cons, &sel, now_ms)
+        resolve_and_reconcile(hub, &mut cons, &sel, now_ms)
     });
     let label = if raw.is_empty() {
         format!("Relay {}", slot as u8 + 1)
@@ -162,6 +155,8 @@ pub struct LucentRelayDspState {
     pub(crate) last_resolve_ms: Option<u64>,
     /// Reused consumer-list buffer for `read_consumers_into` (no per-resolve alloc).
     pub(crate) consumers_scratch: Vec<String>,
+    pub(crate) in0: Vec<f32>,
+    pub(crate) in1: Vec<f32>,
     pub(crate) liveness: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) instance_key: usize,
 }
@@ -202,6 +197,8 @@ impl Default for LucentRelayDspState {
             resolved_target: String::new(),
             last_resolve_ms: None,
             consumers_scratch: Vec::new(),
+            in0: Vec::new(),
+            in1: Vec::new(),
             liveness: None,
             instance_key: 0,
         }
@@ -260,7 +257,9 @@ impl LucentRelayDspState {
                         } else {
                             raw
                         };
-                        let _touched = hub.touch(slot as u8, generation, &label, &target, now);
+                        if !hub.touch(slot as u8, generation, &label, &target, now) {
+                            ss.slot.store(-1, Ordering::Release);
+                        }
                     }
                 }
             }
@@ -271,7 +270,7 @@ impl LucentRelayDspState {
     /// per `RESOLVE_INTERVAL_MS`, or immediately when `force` (target param
     /// changed / state loaded). Keeps the per-block and per-FFT-hop paths
     /// free of consumer-table scans.
-    pub(crate) fn resolve_target(&mut self, params: &LucentRelayParams, now_ms: u64, force: bool) {
+    pub(crate) fn resolve_target(&mut self, _params: &LucentRelayParams, now_ms: u64, force: bool) {
         if !force
             && let Some(last) = self.last_resolve_ms
             && now_ms.wrapping_sub(last) < RESOLVE_INTERVAL_MS
@@ -284,7 +283,6 @@ impl LucentRelayDspState {
         self.last_resolve_ms = Some(now_ms);
         self.resolved_target = resolve_and_reconcile(
             hub,
-            params,
             &mut self.consumers_scratch,
             &self.cached_target,
             now_ms,
@@ -316,6 +314,9 @@ impl LucentRelayDspState {
             );
             if !ok {
                 self.claimed_slot = None;
+                self.shm_state
+                    .slot
+                    .store(-1, std::sync::atomic::Ordering::Release);
             }
         }
     }
@@ -368,6 +369,8 @@ impl PluginLogic for LucentRelay {
         sync_live(params);
         state.claim_slot();
         state.spawn_liveness_thread(params);
+        state.in0.resize(4096, 0.0);
+        state.in1.resize(4096, 0.0);
     }
 
     fn process(
@@ -395,8 +398,10 @@ impl PluginLogic for LucentRelay {
 
 impl Drop for LucentRelayDspState {
     fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.shm_state.slot.store(-1, Ordering::Release);
         if let Some(alive) = self.liveness.take() {
-            alive.store(false, std::sync::atomic::Ordering::Release);
+            alive.store(false, Ordering::Release);
         }
         if let Some(slot) = self.claimed_slot.take()
             && let Some(hub) = relay_hub()
@@ -407,7 +412,7 @@ impl Drop for LucentRelayDspState {
 }
 
 #[cfg(feature = "clap")]
-aura::export!(LucentRelay);
+aura::export_clap!(LucentRelay);
 
 #[cfg(feature = "vst3")]
 aura::export_vst3!(LucentRelay);

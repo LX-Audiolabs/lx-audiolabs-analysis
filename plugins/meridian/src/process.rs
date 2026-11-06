@@ -16,6 +16,14 @@ use crate::{
     MeridianDspState, MeridianParams, db_to_gain, gain_to_db, inflate_shape, soft_clip, tube_warm,
 };
 
+fn take_grow(slot: &mut Vec<f32>, n: usize) -> Vec<f32> {
+    let mut v = std::mem::take(slot);
+    if v.len() < n {
+        v.resize(n, 0.0);
+    }
+    v
+}
+
 /// Per-block control / param snapshot.
 pub(crate) struct ProcessControl {
     pub bypass: bool,
@@ -92,40 +100,6 @@ fn param_update(state: &mut MeridianDspState, params: &MeridianParams) -> Proces
         if let Ok(mut bins) = params.shared.spectrum.bins.try_lock() {
             bins.fill(-90.0);
         }
-        state.hpf_l.reset();
-        state.hpf_r.reset();
-        state.lpf_l.reset();
-        state.lpf_r.reset();
-        state.hpf2_l.reset();
-        state.hpf2_r.reset();
-        state.lpf2_l.reset();
-        state.lpf2_r.reset();
-        state.bass_l.reset();
-        state.bass_r.reset();
-        state.lo_mid_l.reset();
-        state.lo_mid_r.reset();
-        state.mid_l.reset();
-        state.mid_r.reset();
-        state.high_l.reset();
-        state.high_r.reset();
-        state.excite_l.reset();
-        state.excite_r.reset();
-        state.tilt_l.reset();
-        state.tilt_r.reset();
-        state.excite_hp_l.reset();
-        state.excite_hp_r.reset();
-        state.xo_inflate_lo_l.reset();
-        state.xo_inflate_lo_r.reset();
-        state.xo_inflate_hi_l.reset();
-        state.xo_inflate_hi_r.reset();
-        state.xo_bass_mid_l.reset();
-        state.xo_bass_mid_r.reset();
-        state.xo_low_bass_l.reset();
-        state.xo_low_bass_r.reset();
-        state.xo_mid_high_l.reset();
-        state.xo_mid_high_r.reset();
-        state.xo_highmid_high_l.reset();
-        state.xo_highmid_high_r.reset();
     }
 
     let sample_rate = params.shared.spectrum.sample_rate.load(Ordering::Acquire);
@@ -447,18 +421,89 @@ fn process_block(
     let mut gr_db = 0.0f32;
     let mut max_gr_db = 0.0f32;
 
-    // Copy I/O — AURA buffer has separate input/output borrows (no dual-mut io()).
-    let in0: Vec<f32> = buffer.input(0).to_vec();
-    let in1: Vec<f32> = buffer.input(1).to_vec();
-    let mut out0 = vec![0.0f32; num_samples];
-    let mut out1 = vec![0.0f32; num_samples];
+    let mut in0 = take_grow(&mut state.in0, num_samples);
+    let mut in1 = take_grow(&mut state.in1, num_samples);
+    let mut out0 = take_grow(&mut state.out0, num_samples);
+    let mut out1 = take_grow(&mut state.out1, num_samples);
+    in0[..num_samples].copy_from_slice(buffer.input(0));
+    in1[..num_samples].copy_from_slice(buffer.input(1));
 
-    // Feed input LUFS
     if is_measuring {
-        state.auto_loud_in.feed(&in0, &in1);
-        state.pre_sat_buf_l.clear();
-        state.pre_sat_buf_r.clear();
+        state
+            .auto_loud_in
+            .feed(&in0[..num_samples], &in1[..num_samples]);
+        if state.pre_sat_buf_l.len() < num_samples {
+            state.pre_sat_buf_l.resize(num_samples, 0.0);
+            state.pre_sat_buf_r.resize(num_samples, 0.0);
+        }
     }
+
+    if bypass != state.was_bypass {
+        if state.was_bypass && !bypass {
+            state.hpf_l.reset();
+            state.hpf_r.reset();
+            state.lpf_l.reset();
+            state.lpf_r.reset();
+            state.hpf2_l.reset();
+            state.hpf2_r.reset();
+            state.lpf2_l.reset();
+            state.lpf2_r.reset();
+            state.bass_l.reset();
+            state.bass_r.reset();
+            state.lo_mid_l.reset();
+            state.lo_mid_r.reset();
+            state.mid_l.reset();
+            state.mid_r.reset();
+            state.high_l.reset();
+            state.high_r.reset();
+            state.excite_l.reset();
+            state.excite_r.reset();
+            state.tilt_l.reset();
+            state.tilt_r.reset();
+            state.excite_hp_l.reset();
+            state.excite_hp_r.reset();
+            state.xo_inflate_lo_l.reset();
+            state.xo_inflate_lo_r.reset();
+            state.xo_inflate_hi_l.reset();
+            state.xo_inflate_hi_r.reset();
+        }
+        state.was_bypass = bypass;
+    }
+
+    if bypass {
+        out0[..num_samples].copy_from_slice(&in0[..num_samples]);
+        out1[..num_samples].copy_from_slice(&in1[..num_samples]);
+        buffer.output(0).copy_from_slice(&out0[..num_samples]);
+        buffer.output(1).copy_from_slice(&out1[..num_samples]);
+        state.in0 = in0;
+        state.in1 = in1;
+        state.out0 = out0;
+        state.out1 = out1;
+        return Some(BlockMetrics {
+            max_out_peak: 0.0,
+            max_out_peak_l: 0.0,
+            max_out_peak_r: 0.0,
+            count_samples: num_samples,
+            block_band_power,
+            num_samples,
+            max_gr_db: 0.0,
+        });
+    }
+
+    let excite_on = excite_amt > 0.0 || excite_blend > 0.0;
+    if excite_on && !state.excite_was_on {
+        state.excite_hp_l.reset();
+        state.excite_hp_r.reset();
+    }
+    state.excite_was_on = excite_on;
+    let inflate_on = inflate_effect > 0.0;
+    if inflate_on && !state.inflate_was_on {
+        state.xo_inflate_lo_l.reset();
+        state.xo_inflate_lo_r.reset();
+        state.xo_inflate_hi_l.reset();
+        state.xo_inflate_hi_r.reset();
+    }
+    state.inflate_was_on = inflate_on;
 
     for i in 0..num_samples {
         count_samples += 1;
@@ -498,7 +543,7 @@ fn process_block(
         x_r = state.tilt_r.process(x_r);
 
         // Exciter
-        if excite_amt > 0.0 || excite_blend > 0.0 {
+        if excite_on {
             let high_l = state.excite_hp_l.process(x_l);
             let high_r = state.excite_hp_r.process(x_r);
             let drive = 1.0 + (excite_amt / 30.0) * 59.0;
@@ -517,10 +562,9 @@ fn process_block(
         comp_l *= comp_makeup_gain;
         comp_r *= comp_makeup_gain;
 
-        // Pre-sat LUFS
         if is_measuring {
-            state.pre_sat_buf_l.push(comp_l);
-            state.pre_sat_buf_r.push(comp_r);
+            state.pre_sat_buf_l[i] = comp_l;
+            state.pre_sat_buf_r[i] = comp_r;
         }
 
         // Warmth
@@ -534,7 +578,7 @@ fn process_block(
         }
 
         // Inflate (Oxford-Inflator-inspired loudness/density waveshaper)
-        if inflate_effect > 0.0 {
+        if inflate_on {
             let shape_one = |v: f32| -> f32 {
                 let v = if inflate_clip {
                     v.clamp(-1.0, 1.0)
@@ -600,9 +644,8 @@ fn process_block(
         processed_l *= out_gain;
         processed_r *= out_gain;
 
-        // Safety clamp
-        processed_l = processed_l.clamp(-1.0, 1.0);
-        processed_r = processed_r.clamp(-1.0, 1.0);
+        processed_l = processed_l.clamp(-4.0, 4.0);
+        processed_r = processed_r.clamp(-4.0, 4.0);
 
         // Crossover analysis for visualizer
         let (low_group_l, high_group_l) = state.xo_bass_mid_l.process(processed_l);
@@ -626,18 +669,12 @@ fn process_block(
             block_band_power[b] += band_power;
         }
 
-        let (meter_l, meter_r) = if bypass {
-            out0[i] = in_l;
-            out1[i] = in_r;
-            (in_l, in_r)
-        } else {
-            max_out_peak = max_out_peak.max(processed_l.abs()).max(processed_r.abs());
-            max_out_peak_l = max_out_peak_l.max(processed_l.abs());
-            max_out_peak_r = max_out_peak_r.max(processed_r.abs());
-            out0[i] = processed_l;
-            out1[i] = processed_r;
-            (processed_l, processed_r)
-        };
+        max_out_peak = max_out_peak.max(processed_l.abs()).max(processed_r.abs());
+        max_out_peak_l = max_out_peak_l.max(processed_l.abs());
+        max_out_peak_r = max_out_peak_r.max(processed_r.abs());
+        out0[i] = processed_l;
+        out1[i] = processed_r;
+        let (meter_l, meter_r) = (processed_l, processed_r);
 
         let corr_lr = meter_l * meter_r;
         let corr_l2 = meter_l * meter_l;
@@ -650,8 +687,12 @@ fn process_block(
             + state.correlation_decay_coef * corr_r2;
     }
 
-    buffer.output(0).copy_from_slice(&out0);
-    buffer.output(1).copy_from_slice(&out1);
+    buffer.output(0).copy_from_slice(&out0[..num_samples]);
+    buffer.output(1).copy_from_slice(&out1[..num_samples]);
+    state.in0 = in0;
+    state.in1 = in1;
+    state.out0 = out0;
+    state.out1 = out1;
 
     Some(BlockMetrics {
         max_out_peak,
@@ -666,7 +707,7 @@ fn process_block(
 fn publish(
     state: &mut MeridianDspState,
     params: &MeridianParams,
-    buffer: &mut AudioBuffer<'_, f32>,
+    _buffer: &mut AudioBuffer<'_, f32>,
     ctrl: &ProcessControl,
     metrics: &mut BlockMetrics,
 ) {
@@ -680,12 +721,14 @@ fn publish(
     let block_band_power = metrics.block_band_power;
     let num_samples = metrics.num_samples;
     let max_gr_db = metrics.max_gr_db;
+    if num_samples == 0 || count_samples == 0 {
+        return;
+    }
 
-    // Copy outs for analysis (can't hold two mut output borrows).
-    let out0: Vec<f32> = buffer.output(0).to_vec();
-    let out1: Vec<f32> = buffer.output(1).to_vec();
-    let in0: Vec<f32> = buffer.input(0).to_vec();
-    let in1: Vec<f32> = buffer.input(1).to_vec();
+    let out0 = take_grow(&mut state.out0, num_samples);
+    let out1 = take_grow(&mut state.out1, num_samples);
+    let in0 = take_grow(&mut state.in0, num_samples);
+    let in1 = take_grow(&mut state.in1, num_samples);
 
     // Gain reduction
     params
@@ -787,9 +830,9 @@ fn publish(
                 for i in 0..fft_size {
                     state.fft_windowed[i] = state.fft_input[i] * state.fft_hann[i];
                 }
-                let fft = state.fft_planner.plan_fft_forward(fft_size);
-                fft.process(&mut state.fft_windowed, &mut state.fft_output_cache)
-                    .ok();
+                let _ = state
+                    .fft_fwd
+                    .process(&mut state.fft_windowed, &mut state.fft_output_cache);
             }
         }
 
@@ -901,12 +944,15 @@ fn publish(
         state.auto_loud_out.reset();
     }
     if is_measuring {
-        if !state.pre_sat_buf_l.is_empty() {
-            state
-                .auto_loud_pre_sat
-                .feed(&state.pre_sat_buf_l, &state.pre_sat_buf_r);
+        if state.pre_sat_buf_l.len() >= num_samples {
+            state.auto_loud_pre_sat.feed(
+                &state.pre_sat_buf_l[..num_samples],
+                &state.pre_sat_buf_r[..num_samples],
+            );
         }
-        state.auto_loud_out.feed(&out0, &out1);
+        state
+            .auto_loud_out
+            .feed(&out0[..num_samples], &out1[..num_samples]);
         let target_samples = (5.0 * sample_rate as f64) as u64;
         if state.auto_loud_out.sample_count() >= target_samples {
             let in_lufs = state.auto_loud_in.loudness_db();
@@ -955,4 +1001,8 @@ fn publish(
                 .push(out0[i] * vis_gain, out1[i] * vis_gain);
         }
     }
+    state.in0 = in0;
+    state.in1 = in1;
+    state.out0 = out0;
+    state.out1 = out1;
 }

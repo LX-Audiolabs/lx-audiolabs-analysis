@@ -896,6 +896,7 @@ pub struct LucentParams {
     pub resonance_active: BoolParam,
     #[param(id = 3, name = "Masking", default = 1, group = "Lucent")]
     pub masking_active: BoolParam,
+    // Soft-bypass only (pre-IS_BYPASS). Host hard-bypass fights UI.
     #[param(id = 4, name = "Bypass", default = 0, group = "Lucent")]
     pub bypass_active: BoolParam,
     /// How deep the resonance/masking detectors dig: 0% = shallow (only
@@ -973,6 +974,8 @@ pub struct LucentDspState {
     /// fill the same visual range regardless of the signal's actual level
     /// instead of Lucent's showing a tiny raw-amplitude dot cluster.
     pub(crate) scope_vis_envelope: f32,
+    pub(crate) in0: Vec<f32>,
+    pub(crate) in1: Vec<f32>,
 }
 
 impl LucentDspState {
@@ -1096,6 +1099,8 @@ impl Default for LucentDspState {
             liveness: None,
             instance_key: 0,
             scope_vis_envelope: 1e-4,
+            in0: Vec::new(),
+            in1: Vec::new(),
         }
     }
 }
@@ -1155,6 +1160,8 @@ impl PluginLogic for Lucent {
         state.ensure_consumer_slot(params, now_ms);
         state.publish_consumer_name(params, now_ms);
         state.spawn_consumer_heartbeat(params);
+        state.in0.resize(4096, 0.0);
+        state.in1.resize(4096, 0.0);
     }
 
     fn process(
@@ -1198,7 +1205,7 @@ impl Drop for LucentDspState {
 }
 
 #[cfg(feature = "clap")]
-aura::export!(Lucent);
+aura::export_clap!(Lucent);
 
 #[cfg(feature = "vst3")]
 aura::export_vst3!(Lucent);
@@ -1276,7 +1283,9 @@ mod masking_tests {
 
 #[cfg(test)]
 mod tests {
-    use crate::Lucent;
+    use aura::prelude::*;
+
+    use crate::{Lucent, LucentParams};
 
     #[test]
     fn renders_pass_through() {
@@ -1290,5 +1299,41 @@ mod tests {
     #[test]
     fn state_round_trips() {
         aura_test::assert_state_round_trip::<Lucent>();
+    }
+
+    #[test]
+    fn bypass_param_is_soft_only() {
+        let p = LucentParams::default();
+        let info = p
+            .param_infos()
+            .into_iter()
+            .find(|i| i.id == 4)
+            .expect("bypass id 4");
+        assert!(!info.flags.contains(ParamFlags::IS_BYPASS));
+        assert!(info.flags.contains(ParamFlags::AUTOMATABLE));
+    }
+
+    /// Analyser: bypass must still pass audio (and skip analysis work).
+    #[test]
+    fn bypass_still_passes_audio() {
+        let params = LucentParams::default();
+        params.bypass_active.set_value(true);
+        let frames = 128;
+        let sample_rate = 48_000.0;
+        let mut state = Lucent::init(&params, sample_rate);
+        let config = AudioConfig::new(sample_rate, frames).with_channels(2, 2);
+        Lucent::reset(&mut state, &params, &config);
+        let owned_in = [vec![0.25f32; frames], vec![-0.25f32; frames]];
+        let mut owned_out = [vec![0.0f32; frames], vec![0.0f32; frames]];
+        let in_refs: Vec<&[f32]> = owned_in.iter().map(Vec::as_slice).collect();
+        let mut out_refs: Vec<&mut [f32]> = owned_out.iter_mut().map(Vec::as_mut_slice).collect();
+        let mut buffer = AudioBuffer::from_slices_checked(&in_refs, &mut out_refs, frames);
+        let mut ctx =
+            ProcessContext::new(sample_rate, frames).with_process_mode(ProcessMode::Realtime);
+        let _ = Lucent::process(&mut state, &params, &mut buffer, &mut ctx);
+        for i in 0..frames {
+            assert!((owned_out[0][i] - 0.25).abs() < 1e-6);
+            assert!((owned_out[1][i] + 0.25).abs() < 1e-6);
+        }
     }
 }

@@ -17,6 +17,14 @@ use crate::{
     publish_masking, publish_relays, publish_resonance, sensitivity_thresholds,
 };
 
+fn take_grow(slot: &mut Vec<f32>, n: usize) -> Vec<f32> {
+    let mut v = std::mem::take(slot);
+    if v.len() < n {
+        v.resize(n, 0.0);
+    }
+    v
+}
+
 pub(crate) fn run(
     state: &mut LucentDspState,
     params: &LucentParams,
@@ -43,32 +51,28 @@ pub(crate) fn run(
 
     let mode = params.analyze_mode.value();
 
-    // Pass-through: copy input → output. AURA's buffer has no dual-mut
-    // io(), so inputs are copied to local Vecs before the output borrows.
     let n_ch = buffer.num_inputs().min(buffer.num_outputs());
     let n = buffer.num_samples();
     if n_ch == 0 || n == 0 {
         return ProcessStatus::Continue;
     }
-    for ch in 0..n_ch {
-        if buffer.input(ch).is_empty() {
-            continue;
-        }
-        let inp = buffer.input(ch).to_vec();
-        buffer.output(ch).copy_from_slice(&inp);
+    let mut in0 = take_grow(&mut state.in0, n);
+    let mut in1 = take_grow(&mut state.in1, n);
+    in0[..n].copy_from_slice(buffer.input(0));
+    if n_ch > 1 {
+        in1[..n].copy_from_slice(buffer.input(1));
+    } else {
+        in1[..n].copy_from_slice(&in0[..n]);
+    }
+    buffer.output(0).copy_from_slice(&in0[..n]);
+    if n_ch > 1 {
+        buffer.output(1).copy_from_slice(&in1[..n]);
     }
 
-    // Snapshot L/R from output (always holds the pass-through result).
-    // ponytail: fixed stack cap — DAW blocks stay well under 8k.
-    const MAX_BLOCK: usize = 8192;
-    let n = n.min(MAX_BLOCK);
-    let mut lbuf = [0.0f32; MAX_BLOCK];
-    let mut rbuf = [0.0f32; MAX_BLOCK];
-    lbuf[..n].copy_from_slice(&buffer.output(0)[..n]);
-    if n_ch > 1 {
-        rbuf[..n].copy_from_slice(&buffer.output(1)[..n]);
-    } else {
-        rbuf[..n].copy_from_slice(&lbuf[..n]);
+    if params.bypass_active.value() {
+        state.in0 = in0;
+        state.in1 = in1;
+        return ProcessStatus::Continue;
     }
 
     // Analysis
@@ -84,8 +88,8 @@ pub(crate) fn run(
 
     #[allow(clippy::needless_range_loop)]
     for i in 0..n {
-        let in_l = lbuf[i];
-        let in_r = rbuf[i];
+        let in_l = in0[i];
+        let in_r = in1[i];
         let mono_in = (in_l + in_r) * 0.5;
 
         max_out_l = max_out_l.max(in_l.abs());
@@ -376,7 +380,7 @@ pub(crate) fn run(
     // raw-amplitude dot cluster at typical (well below full-scale) mix levels.
     {
         let block_peak = (0..n)
-            .map(|i| lbuf[i].abs().max(rbuf[i].abs()))
+            .map(|i| in0[i].abs().max(in1[i].abs()))
             .fold(0.0f32, f32::max)
             .max(1e-9);
         let att = 1.0 - (-(n as f32) / (0.005 * sample_rate)).exp();
@@ -395,9 +399,11 @@ pub(crate) fn run(
             params
                 .shared
                 .scope
-                .push(lbuf[i] * vis_gain, rbuf[i] * vis_gain);
+                .push(in0[i] * vis_gain, in1[i] * vis_gain);
         }
     }
 
+    state.in0 = in0;
+    state.in1 = in1;
     ProcessStatus::Continue
 }

@@ -18,25 +18,24 @@ resolver = "3"
 # AURA framework from crates.io. The published crate names use the `lx-*`
 # namespace; lib names (aura::, aura_dsp::, …) are unchanged.
 # default-features=false keeps format features opt-in; dsp is always on for products.
-lx-aura          = { version = "0.12.0", default-features = false, features = ["dsp"] }
-lx-aura-params   = { version = "0.12.0" }
-lx-aura-core     = { version = "0.12.0" }
-lx-aura-build    = { version = "0.12.0" }
-lx-aura-editor   = { version = "0.12.0", default-features = false }
-lx-aura-baseview = { version = "0.12.0", default-features = false }
+lx-aura          = { version = "0.14.1", default-features = false, features = ["dsp"] }
+lx-aura-params   = { version = "0.14.1" }
+lx-aura-core     = { version = "0.14.1" }
+lx-aura-build    = { version = "0.14.1" }
+lx-aura-editor   = { version = "0.14.1", default-features = false }
+lx-aura-baseview = { version = "0.14.1", default-features = false }
 # Dev-only test helpers (lib name aura_test).
-lx-aura-test     = { version = "0.12.0" }
+lx-aura-test     = { version = "0.14.1" }
 # Portable DSP/analysis algorithms live in AURA; product vault/*Shared in lx_*.
-lx-aura-dsp      = { version = "0.12.0", default-features = false }
+lx-aura-dsp      = { version = "0.14.1", default-features = false }
 lx-shm           = { path = "crates/lx-shm" }
 lx-vault         = { path = "crates/lx-vault" }
 lx-analysis      = { path = "crates/lx-analysis" }
 
-baseview = "0.3"
-# Pin must match AURA / aura-baseview
-slint           = { version = "=1.17.1", default-features = false, features = [
+baseview = "=0.3.4"
+# Pin must match AURA / aura-baseview (AURA 0.14.1 → Slint 1.18.1)
+slint           = { version = "=1.18.1", default-features = false, features = [
     "compat-1-2",
-    "renderer-software",
     "std",
     "raw-window-handle-06",
 ] }

@@ -10,7 +10,7 @@
 //   Warmth → Inflate → Pan → Stereo Width → Mono/Delta → Gain → clamp
 
 use aura::prelude::*;
-use realfft::RealFftPlanner;
+use realfft::{RealFftPlanner, RealToComplex};
 use std::sync::Arc;
 
 use aura_dsp::analysis::{SPECTRUM_BINS, SnapFFT};
@@ -454,6 +454,7 @@ pub struct MeridianParams {
     pub mono_active: BoolParam,
     #[param(id = 39, name = "Delta Diff", default = 0, group = "Stereo/Routing")]
     pub delta_active: BoolParam,
+    // Soft-bypass only (pre-IS_BYPASS). Host hard-bypass fights UI.
     #[param(id = 40, name = "Bypass", default = 0, group = "Stereo/Routing")]
     pub bypass_active: BoolParam,
 
@@ -544,12 +545,19 @@ pub struct MeridianDspState {
     pub(crate) scope_vis_envelope: f32,
 
     // FFT
-    pub(crate) fft_planner: RealFftPlanner<f32>,
+    pub(crate) fft_fwd: Arc<dyn RealToComplex<f32>>,
     pub(crate) fft_input: Vec<f32>,
     pub(crate) fft_write_pos: usize,
     pub(crate) fft_hann: Vec<f32>,
     pub(crate) fft_windowed: Vec<f32>,
     pub(crate) fft_output_cache: Vec<realfft::num_complex::Complex<f32>>,
+    pub(crate) in0: Vec<f32>,
+    pub(crate) in1: Vec<f32>,
+    pub(crate) out0: Vec<f32>,
+    pub(crate) out1: Vec<f32>,
+    pub(crate) was_bypass: bool,
+    pub(crate) excite_was_on: bool,
+    pub(crate) inflate_was_on: bool,
 
     // SNAP
     pub(crate) snap_fft: SnapFFT,
@@ -631,7 +639,10 @@ impl Default for MeridianDspState {
             pre_sat_buf_l: Vec::new(),
             pre_sat_buf_r: Vec::new(),
             scope_vis_envelope: 1e-4,
-            fft_planner: RealFftPlanner::new(),
+            fft_fwd: {
+                let mut planner = RealFftPlanner::<f32>::new();
+                planner.plan_fft_forward(fft_size)
+            },
             fft_input: vec![0.0; fft_size],
             fft_write_pos: 0,
             fft_hann: (0..fft_size)
@@ -642,10 +653,17 @@ impl Default for MeridianDspState {
                 .collect(),
             fft_windowed: vec![0.0; fft_size],
             fft_output_cache: {
-                let mut planner = RealFftPlanner::new();
+                let mut planner = RealFftPlanner::<f32>::new();
                 let fwd = planner.plan_fft_forward(fft_size);
                 fwd.make_output_vec()
             },
+            in0: Vec::new(),
+            in1: Vec::new(),
+            out0: Vec::new(),
+            out1: Vec::new(),
+            was_bypass: false,
+            excite_was_on: false,
+            inflate_was_on: false,
             snap_fft: SnapFFT::new(),
             // -999 sentinels: must not match param defaults or dirty-flag coef
             // updates skip and Biquad::default() (zero coefs) silences output.
@@ -812,10 +830,15 @@ impl PluginLogic for Meridian {
         state.xo_inflate_hi_l.set_cutoff(3000.0, sr);
         state.xo_inflate_hi_r.set_cutoff(3000.0, sr);
 
-        // Recreate Auto-Loud meters at host sample rate
-        state.auto_loud_in = AutoLoudMeter::new(sr);
-        state.auto_loud_pre_sat = AutoLoudMeter::new(sr);
-        state.auto_loud_out = AutoLoudMeter::new(sr);
+        if (state.cached_sample_rate - sr).abs() > 0.5 {
+            state.auto_loud_in = AutoLoudMeter::new(sr);
+            state.auto_loud_pre_sat = AutoLoudMeter::new(sr);
+            state.auto_loud_out = AutoLoudMeter::new(sr);
+        } else {
+            state.auto_loud_in.reset();
+            state.auto_loud_pre_sat.reset();
+            state.auto_loud_out.reset();
+        }
 
         // Crossover frequencies (constant for GUI visualizer)
         for (xo_l, xo_r, fc) in [
@@ -834,6 +857,56 @@ impl PluginLogic for Meridian {
 
         state.correlation_decay_coef = 1.0 - (-1.0 / (0.1 * sr)).exp();
         state.cached_sample_rate = sr;
+
+        for b in [
+            &mut state.hpf_l,
+            &mut state.hpf_r,
+            &mut state.lpf_l,
+            &mut state.lpf_r,
+            &mut state.hpf2_l,
+            &mut state.hpf2_r,
+            &mut state.lpf2_l,
+            &mut state.lpf2_r,
+            &mut state.bass_l,
+            &mut state.bass_r,
+            &mut state.lo_mid_l,
+            &mut state.lo_mid_r,
+            &mut state.mid_l,
+            &mut state.mid_r,
+            &mut state.high_l,
+            &mut state.high_r,
+            &mut state.excite_l,
+            &mut state.excite_r,
+            &mut state.excite_hp_l,
+            &mut state.excite_hp_r,
+        ] {
+            b.reset();
+        }
+        state.tilt_l.reset();
+        state.tilt_r.reset();
+        state.xo_inflate_lo_l.reset();
+        state.xo_inflate_lo_r.reset();
+        state.xo_inflate_hi_l.reset();
+        state.xo_inflate_hi_r.reset();
+        state.xo_bass_mid_l.reset();
+        state.xo_bass_mid_r.reset();
+        state.xo_low_bass_l.reset();
+        state.xo_low_bass_r.reset();
+        state.xo_mid_high_l.reset();
+        state.xo_mid_high_r.reset();
+        state.xo_highmid_high_l.reset();
+        state.xo_highmid_high_r.reset();
+        state.fft_input.fill(0.0);
+        state.fft_write_pos = 0;
+        state.in0.resize(4096, 0.0);
+        state.in1.resize(4096, 0.0);
+        state.out0.resize(4096, 0.0);
+        state.out1.resize(4096, 0.0);
+        state.pre_sat_buf_l.resize(4096, 0.0);
+        state.pre_sat_buf_r.resize(4096, 0.0);
+        state.was_bypass = false;
+        state.excite_was_on = false;
+        state.inflate_was_on = false;
 
         params
             .shared
@@ -857,7 +930,7 @@ impl PluginLogic for Meridian {
 }
 
 #[cfg(feature = "clap")]
-aura::export!(Meridian);
+aura::export_clap!(Meridian);
 
 #[cfg(feature = "vst3")]
 aura::export_vst3!(Meridian);
@@ -872,5 +945,85 @@ mod tests {
     #[test]
     fn state_round_trips() {
         aura_test::assert_state_round_trip::<Meridian>();
+    }
+
+    #[test]
+    fn process_2048_is_finite() {
+        let frames = 2048;
+        let out = aura_test::process_with_input::<Meridian>(
+            &[vec![0.25; frames], vec![-0.25; frames]],
+            frames,
+        );
+        aura_test::assert_no_nans(&out);
+    }
+
+    #[test]
+    fn bypass_param_is_soft_only() {
+        let p = MeridianParams::default();
+        let info = p
+            .param_infos()
+            .into_iter()
+            .find(|i| i.id == 40)
+            .expect("bypass id 40");
+        assert!(!info.flags.contains(ParamFlags::IS_BYPASS));
+        assert!(info.flags.contains(ParamFlags::AUTOMATABLE));
+    }
+
+    #[test]
+    fn bypass_toggle_restores_processing() {
+        let params = MeridianParams::default();
+        // Crank EQ + warmth so wet ≠ dry
+        params.bass_gain.set_value(12.0);
+        params.warmth_drive.set_value(12.0);
+
+        let frames = 256;
+        let sample_rate = 48_000.0;
+        let mut state = Meridian::init(&params, sample_rate);
+        let config = AudioConfig::new(sample_rate, frames).with_channels(2, 2);
+        Meridian::reset(&mut state, &params, &config);
+
+        let in_l = vec![0.25f32; frames];
+        let in_r = vec![-0.25f32; frames];
+
+        let run = |state: &mut MeridianDspState, params: &MeridianParams| -> (Vec<f32>, Vec<f32>) {
+            let owned_in = [in_l.clone(), in_r.clone()];
+            let mut owned_out = [vec![0.0f32; frames], vec![0.0f32; frames]];
+            let in_refs: Vec<&[f32]> = owned_in.iter().map(Vec::as_slice).collect();
+            let mut out_refs: Vec<&mut [f32]> =
+                owned_out.iter_mut().map(Vec::as_mut_slice).collect();
+            let mut buffer = AudioBuffer::from_slices_checked(&in_refs, &mut out_refs, frames);
+            let mut ctx =
+                ProcessContext::new(sample_rate, frames).with_process_mode(ProcessMode::Realtime);
+            let status = Meridian::process(state, params, &mut buffer, &mut ctx);
+            assert!(matches!(
+                status,
+                ProcessStatus::Continue | ProcessStatus::TailFinished
+            ));
+            (owned_out[0].clone(), owned_out[1].clone())
+        };
+
+        params.bypass_active.set_value(false);
+        let (wet_l, _) = run(&mut state, &params);
+
+        params.bypass_active.set_value(true);
+        let (dry_l, dry_r) = run(&mut state, &params);
+        for i in 0..frames {
+            assert!((dry_l[i] - in_l[i]).abs() < 1e-6);
+            assert!((dry_r[i] - in_r[i]).abs() < 1e-6);
+        }
+
+        let wet_differs = wet_l
+            .iter()
+            .zip(dry_l.iter())
+            .any(|(w, d)| (w - d).abs() > 1e-4);
+        assert!(wet_differs, "test setup needs audible wet≠dry");
+
+        params.bypass_active.set_value(false);
+        let (restored_l, _) = run(&mut state, &params);
+        let restored_differs = restored_l
+            .iter()
+            .zip(dry_l.iter())
+            .any(|(w, d)| (w - d).abs() > 1e-4);
+        assert!(restored_differs, "bypass OFF must process again (wet≠dry)");
     }
 }

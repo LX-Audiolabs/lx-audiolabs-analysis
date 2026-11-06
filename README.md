@@ -1,16 +1,15 @@
 # LX Audiolabs — plugins
 
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![Slint](https://img.shields.io/badge/Slint-1.17.1-2379F4.svg)](https://slint.dev)
+[![Slint](https://img.shields.io/badge/Slint-1.18.1-2379F4.svg)](https://slint.dev)
 [![AURA](https://img.shields.io/badge/framework-AURA-6E40C9.svg)](https://github.com/LX-Audiolabs/aura)
-[![agal](https://img.shields.io/badge/powered%20by-agal-00ADD8.svg)](https://github.com/LX-Audiolabs/agal)
 
 Official public product catalog for **LX Audiolabs**, built on **[AURA](https://github.com/LX-Audiolabs/aura)** (Slint UI + CLAP-first). Release CLAPs are built on **GitHub Actions**.
 
 | | |
 |--|--|
 | **License** | [GPL-3.0-or-later](./LICENSE) |
-| **Framework** | [AURA](https://github.com/LX-Audiolabs/aura) via crates.io (`lx-aura-*` 0.12) |
+| **Framework** | [AURA](https://github.com/LX-Audiolabs/aura) via crates.io (`lx-aura-*` 0.14.1) |
 | **Ship format** | **CLAP** (scripts + release zips) |
 | **Other formats** | VST3 / LV2 via AURA features — **self-build**, not packaged here |
 
@@ -43,7 +42,7 @@ plugins/                # products
   lucent/ lucent-relay/
 ```
 
-Runtime GUI: **aura-editor** + **aura-baseview** (default FemtoVG / OpenGL).
+Runtime GUI: **aura-editor** + **aura-baseview** (default FemtoVG / wgpu).
 
 ---
 
@@ -52,7 +51,7 @@ Runtime GUI: **aura-editor** + **aura-baseview** (default FemtoVG / OpenGL).
 ### Framework (AURA)
 
 Ship deps come from **crates.io** (`lx-aura`, `lx-aura-editor`, `lx-aura-dsp`,
-`lx-aura-build`, `lx-aura-test`, … — workspace pins **0.12.0**). Lib names stay
+`lx-aura-build`, `lx-aura-test`, … — workspace pins **0.14.1**). Lib names stay
 `aura::` / `aura_test::` / …
 
 `cargo-aura` / preview / host are **not** on crates.io yet — install from the
@@ -67,7 +66,7 @@ Docs, ship matrix, and format wrappers: **[AURA README](https://github.com/LX-Au
 
 ### System (UI)
 
-Default editor path is **FemtoVG** → needs a working **OpenGL 3.2 Core** (or newer) context. Pure GL 2.x / broken host embeds are unsupported; the UI may fail to open. **Audio processing does not need OpenGL** — only the editor window does.
+Default editor path is **FemtoVG / wgpu** (Vulkan / DirectX 12 / Metal). A working GPU stack is required to open the UI. **Audio processing does not need GPU** — only the editor window does.
 
 ---
 

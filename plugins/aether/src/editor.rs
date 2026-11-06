@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use aura::prelude::*;
@@ -150,9 +150,6 @@ struct VaultUiState {
 pub fn build_editor(params: Arc<AetherParams>) -> Box<dyn Editor> {
     let shared = params.shared.clone();
     let sync_cache = Arc::new(Mutex::new(SyncCache::new()));
-    // apply_profile only once per plugin instance — not on every UI reopen.
-    let restore_params_once = Arc::new(AtomicBool::new(true));
-
     let init_cfg = load_config("Aether");
     let init_vp = init_cfg.vault_path.clone();
     let init_last = init_cfg
@@ -193,7 +190,6 @@ pub fn build_editor(params: Arc<AetherParams>) -> Box<dyn Editor> {
             let params = params.clone();
             let vault_state = vault_state.clone();
             let sync_cache = Arc::clone(&sync_cache);
-            let restore_params_once = Arc::clone(&restore_params_once);
             move |state: LxPluginContext<AetherParams>| {
                 // New Slint component each open; wipe dirty mirrors so labels
                 // and layout are re-pushed (stale cache → empty text / collapse).
@@ -213,7 +209,7 @@ pub fn build_editor(params: Arc<AetherParams>) -> Box<dyn Editor> {
                 }
 
                 // Live vault_state (not frozen init_vp) — path/preset survive UI close.
-                let (live_vp, live_last, live_names, live_cache) = vault_state
+                let (live_vp, live_last, live_names, _live_cache) = vault_state
                     .lock()
                     .ok()
                     .map(|g| {
@@ -240,17 +236,8 @@ pub fn build_editor(params: Arc<AetherParams>) -> Box<dyn Editor> {
                     .or_else(|| load_cached_last_profile().map(|p| p.name))
                     .unwrap_or_default();
                 if !last_name.is_empty() {
+                    // Label only — never apply_profile after clap.state recall.
                     ui.set_preset_name(SharedString::from(last_name.as_str()));
-                    // Values only on first open of this instance. Reopen must
-                    // not re-apply Harman Flat / last_preset over live knobs.
-                    if restore_params_once.swap(false, Ordering::AcqRel) {
-                        let profile = load_cached_last_profile()
-                            .filter(|p| p.name == last_name)
-                            .or_else(|| find_profile(&last_name, &live_vp, &live_cache));
-                        if let Some(pf) = profile {
-                            apply_profile(&state, &pf);
-                        }
-                    }
                 }
 
                 // ── type cycle ──

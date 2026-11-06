@@ -7,7 +7,15 @@ use aura_dsp::analysis::*;
 use aura_dsp::fx::FtzDazGuard;
 use lx_shm::*;
 
-use crate::{FFT_SIZE, LucentRelayDspState, LucentRelayParams, read_persisted, sync_live};
+use crate::{FFT_SIZE, LucentRelayDspState, LucentRelayParams, try_read_persisted};
+
+fn take_grow(slot: &mut Vec<f32>, n: usize) -> Vec<f32> {
+    let mut v = std::mem::take(slot);
+    if v.len() < n {
+        v.resize(n, 0.0);
+    }
+    v
+}
 
 pub(crate) fn run(
     state: &mut LucentRelayDspState,
@@ -21,43 +29,40 @@ pub(crate) fn run(
         state.claim_slot();
     }
 
-    // Lazy state-load resync (truce `state_changed` parity — AURA has no such
-    // hook): persisted name/target changes (host state load or editor edits
-    // while bypassed) update the caches here, force a target re-resolve, and
-    // re-sync the liveness mirror.
-    let (n, t) = read_persisted(params);
-    let mut changed = false;
-    if n != state.cached_name {
-        state.cached_name = n;
-        changed = true;
-    }
-    let target_changed = t != state.cached_target;
-    if target_changed {
-        state.cached_target = t;
-        changed = true;
-    }
-    if changed {
-        sync_live(params);
+    let mut target_changed = false;
+    if let Some((n, t)) = try_read_persisted(params) {
+        if n != state.cached_name {
+            state.cached_name = n;
+        }
+        target_changed = t != state.cached_target;
+        if target_changed {
+            state.cached_target = t;
+        }
     }
     state.resolve_target(params, now_ms, target_changed);
 
-    // Pass-through (copy input → output per channel). AURA buffer has separate
-    // input/output borrows (no dual-mut io()), so snapshot each input first;
-    // the FFT below reads from those snapshots.
     let channels = buffer.num_inputs().min(buffer.num_outputs());
-    let mut inputs: Vec<Vec<f32>> = Vec::with_capacity(channels);
-    for ch in 0..channels {
-        let src = buffer.input(ch).to_vec();
-        buffer.output(ch).copy_from_slice(&src);
-        inputs.push(src);
+    let n_samples = buffer.num_samples();
+    if channels == 0 || n_samples == 0 {
+        return ProcessStatus::Continue;
+    }
+    let mut in0 = take_grow(&mut state.in0, n_samples);
+    let mut in1 = take_grow(&mut state.in1, n_samples);
+    in0[..n_samples].copy_from_slice(buffer.input(0));
+    if channels > 1 {
+        in1[..n_samples].copy_from_slice(buffer.input(1));
+    } else {
+        in1[..n_samples].copy_from_slice(&in0[..n_samples]);
+    }
+    buffer.output(0).copy_from_slice(&in0[..n_samples]);
+    if channels > 1 {
+        buffer.output(1).copy_from_slice(&in1[..n_samples]);
     }
 
-    // FFT: read the input snapshots (buffer borrows released above).
-    let n_samples = buffer.num_samples();
-    if !inputs.is_empty() {
+    {
         for i in 0..n_samples {
-            let l = inputs[0][i];
-            let r = if inputs.len() > 1 { inputs[1][i] } else { l };
+            let l = in0[i];
+            let r = in1[i];
             state.fft_input[state.fft_write_pos] = (l + r) * 0.5;
             state.fft_write_pos += 1;
 
@@ -86,5 +91,7 @@ pub(crate) fn run(
             }
         }
     }
+    state.in0 = in0;
+    state.in1 = in1;
     ProcessStatus::Continue
 }
