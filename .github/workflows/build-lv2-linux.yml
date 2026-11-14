@@ -1,0 +1,157 @@
+name: Build LV2 (Linux)
+
+on:
+  workflow_dispatch:
+
+# All shipping plugins → one Linux job, one zip per plugin (*-lin-lv2).
+# Bundle layout matches cargo-aura install_lv2:
+#   Name.lv2/{manifest.ttl,plugin.ttl,libname.so}
+# TTL comes from write_lv2_ttl_sidecar (real params), not cargo-aura fallback.
+
+jobs:
+  build-linux-lv2:
+    name: Linux LV2 (all plugins)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: cc
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/
+          key: linux-lv2-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml') }}
+          restore-keys: linux-lv2-
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y || sudo apt-get update -y || true
+          sudo apt-get install -y \
+            pkg-config \
+            libfreetype6-dev \
+            libfontconfig1-dev \
+            libgles2-mesa-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libegl-dev \
+            libgl-dev
+
+      - name: Build all plugins (LV2)
+        run: |
+          set -euo pipefail
+          plugs=(aether meridian equilibrium lucent lucent-relay)
+          for p in "${plugs[@]}"; do
+            echo "=== cargo build -p $p --features lv2 ==="
+            cargo build --release --package "$p" \
+              --no-default-features --features lv2
+          done
+
+      - name: Emit LV2 TTL sidecars
+        run: |
+          set -euo pipefail
+          plugs=(aether meridian equilibrium lucent lucent-relay)
+          root="${GITHUB_WORKSPACE:-$PWD}"
+          for p in "${plugs[@]}"; do
+            out="${root}/target/release/${p}-lv2-ttl"
+            mkdir -p "$out"
+            echo "=== emit TTL $p → $out ==="
+            LV2_TTL_OUT="$out" cargo test -p "$p" \
+              --no-default-features --features lv2 --release \
+              tests::writes_lv2_ttl_sidecar -- --exact --nocapture
+            test -f "$out/manifest.ttl"
+            test -f "$out/plugin.ttl"
+          done
+
+      - name: Bundle + zip per plugin
+        id: bundle
+        run: |
+          set -euo pipefail
+          rm -rf target/bundled
+          mkdir -p target/bundled
+
+          # package|so-name|display-name|Cargo.toml
+          rows=(
+            "aether|libaether.so|Aether|plugins/aether/Cargo.toml"
+            "meridian|libmeridian.so|Meridian|plugins/meridian/Cargo.toml"
+            "equilibrium|libequilibrium.so|Equilibrium|plugins/equilibrium/Cargo.toml"
+            "lucent|liblucent.so|Lucent|plugins/lucent/Cargo.toml"
+            "lucent-relay|liblucent_relay.so|Lucent-Relay|plugins/lucent-relay/Cargo.toml"
+          )
+
+          for row in "${rows[@]}"; do
+            IFS='|' read -r pkg so display toml <<< "$row"
+            version=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+            src="target/release/${so}"
+            ttl="target/release/${pkg}-lv2-ttl"
+            if [[ ! -f "$src" ]]; then
+              echo "missing $src" >&2
+              exit 1
+            fi
+            if [[ ! -f "$ttl/manifest.ttl" || ! -f "$ttl/plugin.ttl" ]]; then
+              echo "missing TTL in $ttl" >&2
+              exit 1
+            fi
+
+            bundle="target/bundled/${display}.lv2"
+            mkdir -p "$bundle"
+            cp "$src" "$bundle/$so"
+            cp "$ttl/manifest.ttl" "$ttl/plugin.ttl" "$bundle/"
+
+            zipname="${pkg}-v${version}-lin-lv2.zip"
+            (cd target/bundled && tar -a -cf "$zipname" "${display}.lv2")
+            echo "[OK] $zipname"
+            key=$(echo "$pkg" | tr '-' '_')
+            echo "${key}_version=${version}" >> "$GITHUB_OUTPUT"
+          done
+
+          ls -la target/bundled/*.zip
+          # Sanity: multi-param TTL (not one-gain fallback)
+          grep -c 'lv2:ControlPort' target/bundled/Aether.lv2/plugin.ttl | awk \
+            '$1 > 1 { ok=1 } END { if (!ok) { print "Aether TTL looks like fallback"; exit 1 } }'
+
+      - name: Upload Aether
+        uses: actions/upload-artifact@v6
+        with:
+          name: aether-v${{ steps.bundle.outputs.aether_version }}-lin-lv2
+          path: target/bundled/aether-v*-lin-lv2.zip
+          if-no-files-found: error
+
+      - name: Upload Meridian
+        uses: actions/upload-artifact@v6
+        with:
+          name: meridian-v${{ steps.bundle.outputs.meridian_version }}-lin-lv2
+          path: target/bundled/meridian-v*-lin-lv2.zip
+          if-no-files-found: error
+
+      - name: Upload Equilibrium
+        uses: actions/upload-artifact@v6
+        with:
+          name: equilibrium-v${{ steps.bundle.outputs.equilibrium_version }}-lin-lv2
+          path: target/bundled/equilibrium-v*-lin-lv2.zip
+          if-no-files-found: error
+
+      - name: Upload Lucent
+        uses: actions/upload-artifact@v6
+        with:
+          name: lucent-v${{ steps.bundle.outputs.lucent_version }}-lin-lv2
+          path: target/bundled/lucent-v*-lin-lv2.zip
+          if-no-files-found: error
+
+      - name: Upload Lucent-Relay
+        uses: actions/upload-artifact@v6
+        with:
+          name: lucent-relay-v${{ steps.bundle.outputs.lucent_relay_version }}-lin-lv2
+          path: target/bundled/lucent-relay-v*-lin-lv2.zip
+          if-no-files-found: error

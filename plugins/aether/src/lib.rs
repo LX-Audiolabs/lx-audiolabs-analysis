@@ -521,6 +521,17 @@ aura::export_vst3!(Aether);
 #[cfg(feature = "lv2")]
 aura::export_lv2!(Aether);
 
+/// cargo-aura sidecar: `target/<profile>/{pkg}-lv2-ttl/{manifest,plugin}.ttl`
+#[cfg(feature = "lv2")]
+pub fn write_lv2_ttl_sidecar(out_dir: &std::path::Path) -> std::io::Result<()> {
+    let stem = env!("CARGO_PKG_NAME").replace('-', "_");
+    let ttl = aura::lv2::bundle_ttl_for::<Aether>(&stem);
+    std::fs::create_dir_all(out_dir)?;
+    std::fs::write(out_dir.join("manifest.ttl"), ttl.manifest)?;
+    std::fs::write(out_dir.join("plugin.ttl"), ttl.plugin)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,5 +659,22 @@ mod tests {
             "1.4.3: no IS_BYPASS — host must not own this slot"
         );
         assert!(info.flags.contains(ParamFlags::AUTOMATABLE));
+    }
+
+    #[cfg(feature = "lv2")]
+    #[test]
+    fn writes_lv2_ttl_sidecar() {
+        let dir = std::env::var_os("LV2_TTL_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../target/lv2-ttl")
+                    .join(env!("CARGO_PKG_NAME"))
+            });
+        crate::write_lv2_ttl_sidecar(&dir).expect("write lv2 ttl");
+        let plugin = std::fs::read_to_string(dir.join("plugin.ttl")).unwrap();
+        assert!(plugin.contains("https://lx-audiolabs.com/lv2/aether"));
+        // Real params >> cargo-aura's one-gain fallback TTL.
+        assert!(plugin.matches("lv2:ControlPort").count() > 1);
     }
 }

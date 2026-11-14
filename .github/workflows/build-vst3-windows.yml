@@ -1,0 +1,113 @@
+name: Build VST3 (Windows)
+
+on:
+  workflow_dispatch:
+
+# All shipping plugins → one Windows job, one zip per plugin (*-win-vst3).
+# Bundle layout matches cargo-aura install_vst3 / Steinberg:
+#   Name.vst3/Contents/x86_64-win/Name.vst3
+
+jobs:
+  build-windows-vst3:
+    name: Windows VST3 (all plugins)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/
+          key: windows-vst3-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml') }}
+          restore-keys: windows-vst3-
+
+      - name: Build all plugins (VST3)
+        shell: bash
+        run: |
+          set -euo pipefail
+          plugs=(aether meridian equilibrium lucent lucent-relay)
+          for p in "${plugs[@]}"; do
+            echo "=== cargo build -p $p --features vst3 ==="
+            cargo build --release --package "$p" \
+              --no-default-features --features vst3
+          done
+
+      - name: Bundle + zip per plugin
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf target/bundled
+          mkdir -p target/bundled
+
+          # package|dll-stem|display-name|Cargo.toml
+          rows=(
+            "aether|aether|Aether|plugins/aether/Cargo.toml"
+            "meridian|meridian|Meridian|plugins/meridian/Cargo.toml"
+            "equilibrium|equilibrium|Equilibrium|plugins/equilibrium/Cargo.toml"
+            "lucent|lucent|Lucent|plugins/lucent/Cargo.toml"
+            "lucent-relay|lucent_relay|Lucent-Relay|plugins/lucent-relay/Cargo.toml"
+          )
+
+          for row in "${rows[@]}"; do
+            IFS='|' read -r pkg dll display toml <<< "$row"
+            version=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+            src="target/release/${dll}.dll"
+            if [[ ! -f "$src" ]]; then
+              echo "missing $src" >&2
+              exit 1
+            fi
+
+            bundle="target/bundled/${display}.vst3"
+            arch="${bundle}/Contents/x86_64-win"
+            mkdir -p "$arch"
+            cp "$src" "${arch}/${display}.vst3"
+
+            zipname="${pkg}-v${version}-win-vst3.zip"
+            # Pack so the archive root is Name.vst3/…
+            (cd target/bundled && tar -a -cf "$zipname" "${display}.vst3")
+            echo "[OK] $zipname"
+            # Output keys: underscore only (Actions forbids '-' in names).
+            key=$(echo "$pkg" | tr '-' '_')
+            echo "${key}_version=${version}" >> "$GITHUB_OUTPUT"
+          done
+
+          ls -la target/bundled/*.zip
+
+      - name: Upload Aether
+        uses: actions/upload-artifact@v6
+        with:
+          name: aether-v${{ steps.bundle.outputs.aether_version }}-win-vst3
+          path: target/bundled/aether-v*-win-vst3.zip
+          if-no-files-found: error
+
+      - name: Upload Meridian
+        uses: actions/upload-artifact@v6
+        with:
+          name: meridian-v${{ steps.bundle.outputs.meridian_version }}-win-vst3
+          path: target/bundled/meridian-v*-win-vst3.zip
+          if-no-files-found: error
+
+      - name: Upload Equilibrium
+        uses: actions/upload-artifact@v6
+        with:
+          name: equilibrium-v${{ steps.bundle.outputs.equilibrium_version }}-win-vst3
+          path: target/bundled/equilibrium-v*-win-vst3.zip
+          if-no-files-found: error
+
+      - name: Upload Lucent
+        uses: actions/upload-artifact@v6
+        with:
+          name: lucent-v${{ steps.bundle.outputs.lucent_version }}-win-vst3
+          path: target/bundled/lucent-v*-win-vst3.zip
+          if-no-files-found: error
+
+      - name: Upload Lucent-Relay
+        uses: actions/upload-artifact@v6
+        with:
+          name: lucent-relay-v${{ steps.bundle.outputs.lucent_relay_version }}-win-vst3
+          path: target/bundled/lucent-relay-v*-win-vst3.zip
+          if-no-files-found: error

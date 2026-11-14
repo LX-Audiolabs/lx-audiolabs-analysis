@@ -10,8 +10,8 @@ Official public product catalog for **LX Audiolabs**, built on **[AURA](https://
 |--|--|
 | **License** | [GPL-3.0-or-later](./LICENSE) |
 | **Framework** | [AURA](https://github.com/LX-Audiolabs/aura) via crates.io (`lx-aura-*` 0.14.1) |
-| **Ship format** | **CLAP** (scripts + release zips) |
-| **Other formats** | VST3 / LV2 via AURA features — **self-build**, not packaged here |
+| **Ship format** | **CLAP** (per-plugin Actions) · **Windows VST3** · **Linux LV2** |
+| **Other formats** | macOS VST3/LV2 not shipped (CLAP + Mac ad-hoc signing left out) |
 
 ---
 
@@ -105,20 +105,39 @@ use https://github.com/free-audio/clap-validator
 
 ---
 
-## VST3 / LV2 (self-build)
+## VST3 (Windows — Actions)
 
-**Release packaging and default scripts ship CLAP only.**  
-VST3 and LV2 are supported by **AURA** on its [ship matrix](https://github.com/LX-Audiolabs/aura#clap-first-formats); this catalog does not produce VST3/LV2 zips.
+Workflow **Build VST3 (Windows)** (`workflow_dispatch`) builds all shipping plugins and uploads **one zip per plugin**:
 
-If you need them, build yourself with AURA’s CLI (plugin crates already declare `vst3` / `lv2` features):
+`{crate}-v{version}-win-vst3.zip` → `Name.vst3/Contents/x86_64-win/Name.vst3`
 
 ```powershell
-# Requires AURA + cargo-aura (see above)
-cargo aura install --vst3 --release -plug meridian   # Windows / macOS
-cargo aura install --lv2  --release -plug meridian   # Linux
+# Local equivalent (one plugin)
+cargo build --release -p meridian --no-default-features --features vst3
+# then copy target/release/meridian.dll into Meridian.vst3/Contents/x86_64-win/Meridian.vst3
 ```
 
-Details, host notes, and support matrix: **[github.com/LX-Audiolabs/aura](https://github.com/LX-Audiolabs/aura)**.
+Or with cargo-aura: `cargo aura install --vst3 --release -plug meridian`.
+
+## LV2 (Linux — Actions)
+
+Workflow **Build LV2 (Linux)** (`workflow_dispatch`) builds all shipping plugins and uploads **one zip per plugin**:
+
+`{crate}-v{version}-lin-lv2.zip` → `Name.lv2/{manifest.ttl,plugin.ttl,lib*.so}`
+
+TTL is generated from real params via `write_lv2_ttl_sidecar` (not cargo-aura’s one-gain fallback):
+
+```bash
+cargo build --release -p meridian --no-default-features --features lv2
+LV2_TTL_OUT=target/release/meridian-lv2-ttl \
+  cargo test -p meridian --no-default-features --features lv2 --release \
+  tests::writes_lv2_ttl_sidecar -- --exact
+# then pack Name.lv2/ with the .so + both .ttl files
+```
+
+`cargo aura install --lv2` still works **after** that sidecar exists under `target/<profile>/{pkg}-lv2-ttl/`.
+
+Details and matrix: **[github.com/LX-Audiolabs/aura](https://github.com/LX-Audiolabs/aura)**.
 
 ---
 
