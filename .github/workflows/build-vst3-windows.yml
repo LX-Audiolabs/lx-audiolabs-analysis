@@ -4,10 +4,10 @@ on:
   workflow_dispatch:
 
 # All shipping plugins → one Windows job.
-# One zip per product (*-win-vst3). Lucent + Lucent-Relay share one zip
-# (Lucent's version), same pairing as the CLAP Lucent workflow.
-# Bundle layout matches cargo-aura install_vst3 / Steinberg:
-#   Name.vst3/Contents/x86_64-win/Name.vst3
+# Artifacts are the .vst3 bundles themselves (Actions zips once on download).
+# Do NOT pre-zip — that creates zip-in-zip.
+# Lucent + Lucent-Relay share one artifact (Lucent's version).
+# Layout: Name.vst3/Contents/x86_64-win/Name.vst3
 
 jobs:
   build-windows-vst3:
@@ -37,7 +37,7 @@ jobs:
               --no-default-features --features vst3
           done
 
-      - name: Bundle + zip
+      - name: Bundle VST3 trees
         id: bundle
         shell: bash
         run: |
@@ -56,9 +56,9 @@ jobs:
             local arch="${bundle}/Contents/x86_64-win"
             mkdir -p "$arch"
             cp "$src" "${arch}/${display}.vst3"
+            echo "[OK] $bundle"
           }
 
-          # Solo products: one .vst3 per zip, version from that crate.
           solos=(
             "aether|aether|Aether|plugins/aether/Cargo.toml"
             "meridian|meridian|Meridian|plugins/meridian/Cargo.toml"
@@ -68,47 +68,42 @@ jobs:
             IFS='|' read -r pkg dll display toml <<< "$row"
             version=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
             pack_vst3 "$dll" "$display"
-            zipname="${pkg}-v${version}-win-vst3.zip"
-            (cd target/bundled && tar -a -cf "$zipname" "${display}.vst3")
-            echo "[OK] $zipname"
             echo "${pkg}_version=${version}" >> "$GITHUB_OUTPUT"
           done
 
-          # Lucent pair — always one zip, version from Lucent only.
           lucent_ver=$(grep '^version' plugins/lucent/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           pack_vst3 lucent Lucent
           pack_vst3 lucent_relay Lucent-Relay
-          zipname="lucent-v${lucent_ver}-win-vst3.zip"
-          (cd target/bundled && tar -a -cf "$zipname" Lucent.vst3 Lucent-Relay.vst3)
-          echo "[OK] $zipname (Lucent + Lucent-Relay)"
           echo "lucent_version=${lucent_ver}" >> "$GITHUB_OUTPUT"
 
-          ls -la target/bundled/*.zip
+          find target/bundled -type f | sort
 
       - name: Upload Aether
         uses: actions/upload-artifact@v6
         with:
           name: aether-v${{ steps.bundle.outputs.aether_version }}-win-vst3
-          path: target/bundled/aether-v*-win-vst3.zip
+          path: target/bundled/Aether.vst3
           if-no-files-found: error
 
       - name: Upload Meridian
         uses: actions/upload-artifact@v6
         with:
           name: meridian-v${{ steps.bundle.outputs.meridian_version }}-win-vst3
-          path: target/bundled/meridian-v*-win-vst3.zip
+          path: target/bundled/Meridian.vst3
           if-no-files-found: error
 
       - name: Upload Equilibrium
         uses: actions/upload-artifact@v6
         with:
           name: equilibrium-v${{ steps.bundle.outputs.equilibrium_version }}-win-vst3
-          path: target/bundled/equilibrium-v*-win-vst3.zip
+          path: target/bundled/Equilibrium.vst3
           if-no-files-found: error
 
       - name: Upload Lucent (+ Relay)
         uses: actions/upload-artifact@v6
         with:
           name: lucent-v${{ steps.bundle.outputs.lucent_version }}-win-vst3
-          path: target/bundled/lucent-v*-win-vst3.zip
+          path: |
+            target/bundled/Lucent.vst3
+            target/bundled/Lucent-Relay.vst3
           if-no-files-found: error
