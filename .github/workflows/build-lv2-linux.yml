@@ -4,16 +4,16 @@ on:
   workflow_dispatch:
 
 # All shipping plugins → one Linux job.
-# Artifacts are the .lv2 bundles themselves (Actions zips once on download).
-# Do NOT pre-zip — that creates zip-in-zip.
+# Build on ubuntu-22.04 so glibc stays ≤2.35 (ubuntu-latest links GLIBC_2.43+
+# and fails to dlopen on many desktop distros).
+# Upload a *parent* dir that contains Name.lv2/ so the download zip root is
+# Name.lv2/… (path=Name.lv2 alone strips the folder name).
 # Lucent + Lucent-Relay share one artifact (Lucent's version).
-# Layout: Name.lv2/{manifest.ttl,plugin.ttl,libname.so}
-# TTL from write_lv2_ttl_sidecar (real params), not cargo-aura fallback.
 
 jobs:
   build-linux-lv2:
     name: Linux LV2 (all plugins)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: cc
     steps:
@@ -26,8 +26,8 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target/
-          key: linux-lv2-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml') }}
-          restore-keys: linux-lv2-
+          key: linux-lv2-jammy-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml') }}
+          restore-keys: linux-lv2-jammy-
 
       - name: Install build dependencies
         run: |
@@ -80,7 +80,7 @@ jobs:
         id: bundle
         run: |
           set -euo pipefail
-          rm -rf target/bundled
+          rm -rf target/bundled target/artifacts
           mkdir -p target/bundled
 
           pack_lv2() {
@@ -102,6 +102,17 @@ jobs:
             echo "[OK] $bundle"
           }
 
+          # Parent dir keeps Name.lv2 as zip root under upload-artifact.
+          stage() {
+            local art="$1"
+            shift
+            local dest="target/artifacts/${art}"
+            mkdir -p "$dest"
+            for name in "$@"; do
+              cp -a "target/bundled/${name}" "$dest/"
+            done
+          }
+
           solos=(
             "aether|libaether.so|Aether|plugins/aether/Cargo.toml"
             "meridian|libmeridian.so|Meridian|plugins/meridian/Cargo.toml"
@@ -111,44 +122,53 @@ jobs:
             IFS='|' read -r pkg so display toml <<< "$row"
             version=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
             pack_lv2 "$pkg" "$so" "$display"
+            stage "${pkg}-v${version}-lin-lv2" "${display}.lv2"
             echo "${pkg}_version=${version}" >> "$GITHUB_OUTPUT"
           done
 
           lucent_ver=$(grep '^version' plugins/lucent/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           pack_lv2 lucent liblucent.so Lucent
           pack_lv2 lucent-relay liblucent_relay.so Lucent-Relay
+          stage "lucent-v${lucent_ver}-lin-lv2" Lucent.lv2 Lucent-Relay.lv2
           echo "lucent_version=${lucent_ver}" >> "$GITHUB_OUTPUT"
 
-          find target/bundled -type f | sort
+          find target/artifacts -type f | sort
           grep -c 'lv2:ControlPort' target/bundled/Aether.lv2/plugin.ttl | awk \
             '$1 > 1 { ok=1 } END { if (!ok) { print "Aether TTL looks like fallback"; exit 1 } }'
+          grep -q 'libaether\.so' target/bundled/Aether.lv2/manifest.ttl
+          # glibc sanity: refuse symbols newer than jammy if objdump available
+          if command -v objdump >/dev/null; then
+            if objdump -T target/release/libaether.so 2>/dev/null | grep -E 'GLIBC_2\.(3[6-9]|[4-9])' ; then
+              echo "ERROR: binary needs glibc newer than ubuntu-22.04 baseline" >&2
+              exit 1
+            fi
+            echo "glibc symbols OK (≤2.35 baseline expected on jammy)"
+          fi
 
       - name: Upload Aether
         uses: actions/upload-artifact@v6
         with:
           name: aether-v${{ steps.bundle.outputs.aether_version }}-lin-lv2
-          path: target/bundled/Aether.lv2
+          path: target/artifacts/aether-v${{ steps.bundle.outputs.aether_version }}-lin-lv2
           if-no-files-found: error
 
       - name: Upload Meridian
         uses: actions/upload-artifact@v6
         with:
           name: meridian-v${{ steps.bundle.outputs.meridian_version }}-lin-lv2
-          path: target/bundled/Meridian.lv2
+          path: target/artifacts/meridian-v${{ steps.bundle.outputs.meridian_version }}-lin-lv2
           if-no-files-found: error
 
       - name: Upload Equilibrium
         uses: actions/upload-artifact@v6
         with:
           name: equilibrium-v${{ steps.bundle.outputs.equilibrium_version }}-lin-lv2
-          path: target/bundled/Equilibrium.lv2
+          path: target/artifacts/equilibrium-v${{ steps.bundle.outputs.equilibrium_version }}-lin-lv2
           if-no-files-found: error
 
       - name: Upload Lucent (+ Relay)
         uses: actions/upload-artifact@v6
         with:
           name: lucent-v${{ steps.bundle.outputs.lucent_version }}-lin-lv2
-          path: |
-            target/bundled/Lucent.lv2
-            target/bundled/Lucent-Relay.lv2
+          path: target/artifacts/lucent-v${{ steps.bundle.outputs.lucent_version }}-lin-lv2
           if-no-files-found: error

@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
 
 # All shipping plugins → one Windows job.
-# Artifacts are the .vst3 bundles themselves (Actions zips once on download).
-# Do NOT pre-zip — that creates zip-in-zip.
+# Upload a parent dir that contains Name.vst3/ so download zip root is Name.vst3/
+# (path=Name.vst3 alone strips the folder).
 # Lucent + Lucent-Relay share one artifact (Lucent's version).
 # Layout: Name.vst3/Contents/x86_64-win/Name.vst3
 
@@ -42,7 +42,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf target/bundled
+          rm -rf target/bundled target/artifacts
           mkdir -p target/bundled
 
           pack_vst3() {
@@ -59,6 +59,16 @@ jobs:
             echo "[OK] $bundle"
           }
 
+          stage() {
+            local art="$1"
+            shift
+            local dest="target/artifacts/${art}"
+            mkdir -p "$dest"
+            for name in "$@"; do
+              cp -a "target/bundled/${name}" "$dest/"
+            done
+          }
+
           solos=(
             "aether|aether|Aether|plugins/aether/Cargo.toml"
             "meridian|meridian|Meridian|plugins/meridian/Cargo.toml"
@@ -68,42 +78,42 @@ jobs:
             IFS='|' read -r pkg dll display toml <<< "$row"
             version=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
             pack_vst3 "$dll" "$display"
+            stage "${pkg}-v${version}-win-vst3" "${display}.vst3"
             echo "${pkg}_version=${version}" >> "$GITHUB_OUTPUT"
           done
 
           lucent_ver=$(grep '^version' plugins/lucent/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           pack_vst3 lucent Lucent
           pack_vst3 lucent_relay Lucent-Relay
+          stage "lucent-v${lucent_ver}-win-vst3" Lucent.vst3 Lucent-Relay.vst3
           echo "lucent_version=${lucent_ver}" >> "$GITHUB_OUTPUT"
 
-          find target/bundled -type f | sort
+          find target/artifacts -type f | sort
 
       - name: Upload Aether
         uses: actions/upload-artifact@v6
         with:
           name: aether-v${{ steps.bundle.outputs.aether_version }}-win-vst3
-          path: target/bundled/Aether.vst3
+          path: target/artifacts/aether-v${{ steps.bundle.outputs.aether_version }}-win-vst3
           if-no-files-found: error
 
       - name: Upload Meridian
         uses: actions/upload-artifact@v6
         with:
           name: meridian-v${{ steps.bundle.outputs.meridian_version }}-win-vst3
-          path: target/bundled/Meridian.vst3
+          path: target/artifacts/meridian-v${{ steps.bundle.outputs.meridian_version }}-win-vst3
           if-no-files-found: error
 
       - name: Upload Equilibrium
         uses: actions/upload-artifact@v6
         with:
           name: equilibrium-v${{ steps.bundle.outputs.equilibrium_version }}-win-vst3
-          path: target/bundled/Equilibrium.vst3
+          path: target/artifacts/equilibrium-v${{ steps.bundle.outputs.equilibrium_version }}-win-vst3
           if-no-files-found: error
 
       - name: Upload Lucent (+ Relay)
         uses: actions/upload-artifact@v6
         with:
           name: lucent-v${{ steps.bundle.outputs.lucent_version }}-win-vst3
-          path: |
-            target/bundled/Lucent.vst3
-            target/bundled/Lucent-Relay.vst3
+          path: target/artifacts/lucent-v${{ steps.bundle.outputs.lucent_version }}-win-vst3
           if-no-files-found: error
