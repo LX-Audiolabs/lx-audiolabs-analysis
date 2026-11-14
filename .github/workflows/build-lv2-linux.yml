@@ -136,13 +136,19 @@ jobs:
           grep -c 'lv2:ControlPort' target/bundled/Aether.lv2/plugin.ttl | awk \
             '$1 > 1 { ok=1 } END { if (!ok) { print "Aether TTL looks like fallback"; exit 1 } }'
           grep -q 'libaether\.so' target/bundled/Aether.lv2/manifest.ttl
-          # glibc sanity: refuse symbols newer than jammy if objdump available
+          # glibc sanity: jammy = 2.35. Match only 2.36+ (not 2.9 — that is older).
           if command -v objdump >/dev/null; then
-            if objdump -T target/release/libaether.so 2>/dev/null | grep -E 'GLIBC_2\.(3[6-9]|[4-9])' ; then
-              echo "ERROR: binary needs glibc newer than ubuntu-22.04 baseline" >&2
+            bad=$(objdump -T target/release/libaether.so 2>/dev/null \
+              | grep -oE 'GLIBC_2\.[0-9]+' | sort -u \
+              | awk -F. '{ if ($2+0 >= 36) print }' || true)
+            if [[ -n "$bad" ]]; then
+              echo "ERROR: binary needs glibc newer than ubuntu-22.04:" >&2
+              echo "$bad" >&2
               exit 1
             fi
-            echo "glibc symbols OK (≤2.35 baseline expected on jammy)"
+            echo "glibc symbols OK (no GLIBC_2.36+)"
+            objdump -T target/release/libaether.so 2>/dev/null \
+              | grep -oE 'GLIBC_2\.[0-9]+' | sort -u | tail -5
           fi
 
       - name: Upload Aether
