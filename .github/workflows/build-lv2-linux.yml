@@ -3,7 +3,9 @@ name: Build LV2 (Linux)
 on:
   workflow_dispatch:
 
-# All shipping plugins → one Linux job, one zip per plugin (*-lin-lv2).
+# All shipping plugins → one Linux job.
+# One zip per product (*-lin-lv2). Lucent + Lucent-Relay share one zip
+# (Lucent's version), same pairing as the CLAP Lucent workflow.
 # Bundle layout matches cargo-aura install_lv2:
 #   Name.lv2/{manifest.ttl,plugin.ttl,libname.so}
 # TTL comes from write_lv2_ttl_sidecar (real params), not cargo-aura fallback.
@@ -74,27 +76,17 @@ jobs:
             test -f "$out/plugin.ttl"
           done
 
-      - name: Bundle + zip per plugin
+      - name: Bundle + zip
         id: bundle
         run: |
           set -euo pipefail
           rm -rf target/bundled
           mkdir -p target/bundled
 
-          # package|so-name|display-name|Cargo.toml
-          rows=(
-            "aether|libaether.so|Aether|plugins/aether/Cargo.toml"
-            "meridian|libmeridian.so|Meridian|plugins/meridian/Cargo.toml"
-            "equilibrium|libequilibrium.so|Equilibrium|plugins/equilibrium/Cargo.toml"
-            "lucent|liblucent.so|Lucent|plugins/lucent/Cargo.toml"
-            "lucent-relay|liblucent_relay.so|Lucent-Relay|plugins/lucent-relay/Cargo.toml"
-          )
-
-          for row in "${rows[@]}"; do
-            IFS='|' read -r pkg so display toml <<< "$row"
-            version=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
-            src="target/release/${so}"
-            ttl="target/release/${pkg}-lv2-ttl"
+          pack_lv2() {
+            local pkg="$1" so="$2" display="$3"
+            local src="target/release/${so}"
+            local ttl="target/release/${pkg}-lv2-ttl"
             if [[ ! -f "$src" ]]; then
               echo "missing $src" >&2
               exit 1
@@ -103,18 +95,36 @@ jobs:
               echo "missing TTL in $ttl" >&2
               exit 1
             fi
-
-            bundle="target/bundled/${display}.lv2"
+            local bundle="target/bundled/${display}.lv2"
             mkdir -p "$bundle"
             cp "$src" "$bundle/$so"
             cp "$ttl/manifest.ttl" "$ttl/plugin.ttl" "$bundle/"
+          }
 
+          # Solo products: one .lv2 per zip, version from that crate.
+          solos=(
+            "aether|libaether.so|Aether|plugins/aether/Cargo.toml"
+            "meridian|libmeridian.so|Meridian|plugins/meridian/Cargo.toml"
+            "equilibrium|libequilibrium.so|Equilibrium|plugins/equilibrium/Cargo.toml"
+          )
+          for row in "${solos[@]}"; do
+            IFS='|' read -r pkg so display toml <<< "$row"
+            version=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+            pack_lv2 "$pkg" "$so" "$display"
             zipname="${pkg}-v${version}-lin-lv2.zip"
             (cd target/bundled && tar -a -cf "$zipname" "${display}.lv2")
             echo "[OK] $zipname"
-            key=$(echo "$pkg" | tr '-' '_')
-            echo "${key}_version=${version}" >> "$GITHUB_OUTPUT"
+            echo "${pkg}_version=${version}" >> "$GITHUB_OUTPUT"
           done
+
+          # Lucent pair — always one zip, version from Lucent only.
+          lucent_ver=$(grep '^version' plugins/lucent/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          pack_lv2 lucent liblucent.so Lucent
+          pack_lv2 lucent-relay liblucent_relay.so Lucent-Relay
+          zipname="lucent-v${lucent_ver}-lin-lv2.zip"
+          (cd target/bundled && tar -a -cf "$zipname" Lucent.lv2 Lucent-Relay.lv2)
+          echo "[OK] $zipname (Lucent + Lucent-Relay)"
+          echo "lucent_version=${lucent_ver}" >> "$GITHUB_OUTPUT"
 
           ls -la target/bundled/*.zip
           # Sanity: multi-param TTL (not one-gain fallback)
@@ -142,16 +152,9 @@ jobs:
           path: target/bundled/equilibrium-v*-lin-lv2.zip
           if-no-files-found: error
 
-      - name: Upload Lucent
+      - name: Upload Lucent (+ Relay)
         uses: actions/upload-artifact@v6
         with:
           name: lucent-v${{ steps.bundle.outputs.lucent_version }}-lin-lv2
           path: target/bundled/lucent-v*-lin-lv2.zip
-          if-no-files-found: error
-
-      - name: Upload Lucent-Relay
-        uses: actions/upload-artifact@v6
-        with:
-          name: lucent-relay-v${{ steps.bundle.outputs.lucent_relay_version }}-lin-lv2
-          path: target/bundled/lucent-relay-v*-lin-lv2.zip
           if-no-files-found: error

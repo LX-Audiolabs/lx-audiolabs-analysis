@@ -109,7 +109,8 @@ use https://github.com/free-audio/clap-validator
 
 Workflow **Build VST3 (Windows)** (`workflow_dispatch`) builds all shipping plugins and uploads **one zip per plugin**:
 
-`{crate}-v{version}-win-vst3.zip` → `Name.vst3/Contents/x86_64-win/Name.vst3`
+`{crate}-v{version}-win-vst3.zip` → `Name.vst3/Contents/x86_64-win/Name.vst3`  
+Lucent + Lucent-Relay ship **together** as `lucent-v{lucent_version}-win-vst3.zip`.
 
 ```powershell
 # Local equivalent (one plugin)
@@ -123,7 +124,8 @@ Or with cargo-aura: `cargo aura install --vst3 --release -plug meridian`.
 
 Workflow **Build LV2 (Linux)** (`workflow_dispatch`) builds all shipping plugins and uploads **one zip per plugin**:
 
-`{crate}-v{version}-lin-lv2.zip` → `Name.lv2/{manifest.ttl,plugin.ttl,lib*.so}`
+`{crate}-v{version}-lin-lv2.zip` → `Name.lv2/{manifest.ttl,plugin.ttl,lib*.so}`  
+Lucent + Lucent-Relay ship **together** as `lucent-v{lucent_version}-lin-lv2.zip`.
 
 TTL is generated from real params via `write_lv2_ttl_sidecar` (not cargo-aura’s one-gain fallback):
 

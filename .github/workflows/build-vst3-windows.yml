@@ -3,7 +3,9 @@ name: Build VST3 (Windows)
 on:
   workflow_dispatch:
 
-# All shipping plugins → one Windows job, one zip per plugin (*-win-vst3).
+# All shipping plugins → one Windows job.
+# One zip per product (*-win-vst3). Lucent + Lucent-Relay share one zip
+# (Lucent's version), same pairing as the CLAP Lucent workflow.
 # Bundle layout matches cargo-aura install_vst3 / Steinberg:
 #   Name.vst3/Contents/x86_64-win/Name.vst3
 
@@ -35,7 +37,7 @@ jobs:
               --no-default-features --features vst3
           done
 
-      - name: Bundle + zip per plugin
+      - name: Bundle + zip
         id: bundle
         shell: bash
         run: |
@@ -43,37 +45,43 @@ jobs:
           rm -rf target/bundled
           mkdir -p target/bundled
 
-          # package|dll-stem|display-name|Cargo.toml
-          rows=(
-            "aether|aether|Aether|plugins/aether/Cargo.toml"
-            "meridian|meridian|Meridian|plugins/meridian/Cargo.toml"
-            "equilibrium|equilibrium|Equilibrium|plugins/equilibrium/Cargo.toml"
-            "lucent|lucent|Lucent|plugins/lucent/Cargo.toml"
-            "lucent-relay|lucent_relay|Lucent-Relay|plugins/lucent-relay/Cargo.toml"
-          )
-
-          for row in "${rows[@]}"; do
-            IFS='|' read -r pkg dll display toml <<< "$row"
-            version=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
-            src="target/release/${dll}.dll"
+          pack_vst3() {
+            local dll="$1" display="$2"
+            local src="target/release/${dll}.dll"
             if [[ ! -f "$src" ]]; then
               echo "missing $src" >&2
               exit 1
             fi
-
-            bundle="target/bundled/${display}.vst3"
-            arch="${bundle}/Contents/x86_64-win"
+            local bundle="target/bundled/${display}.vst3"
+            local arch="${bundle}/Contents/x86_64-win"
             mkdir -p "$arch"
             cp "$src" "${arch}/${display}.vst3"
+          }
 
+          # Solo products: one .vst3 per zip, version from that crate.
+          solos=(
+            "aether|aether|Aether|plugins/aether/Cargo.toml"
+            "meridian|meridian|Meridian|plugins/meridian/Cargo.toml"
+            "equilibrium|equilibrium|Equilibrium|plugins/equilibrium/Cargo.toml"
+          )
+          for row in "${solos[@]}"; do
+            IFS='|' read -r pkg dll display toml <<< "$row"
+            version=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+            pack_vst3 "$dll" "$display"
             zipname="${pkg}-v${version}-win-vst3.zip"
-            # Pack so the archive root is Name.vst3/…
             (cd target/bundled && tar -a -cf "$zipname" "${display}.vst3")
             echo "[OK] $zipname"
-            # Output keys: underscore only (Actions forbids '-' in names).
-            key=$(echo "$pkg" | tr '-' '_')
-            echo "${key}_version=${version}" >> "$GITHUB_OUTPUT"
+            echo "${pkg}_version=${version}" >> "$GITHUB_OUTPUT"
           done
+
+          # Lucent pair — always one zip, version from Lucent only.
+          lucent_ver=$(grep '^version' plugins/lucent/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          pack_vst3 lucent Lucent
+          pack_vst3 lucent_relay Lucent-Relay
+          zipname="lucent-v${lucent_ver}-win-vst3.zip"
+          (cd target/bundled && tar -a -cf "$zipname" Lucent.vst3 Lucent-Relay.vst3)
+          echo "[OK] $zipname (Lucent + Lucent-Relay)"
+          echo "lucent_version=${lucent_ver}" >> "$GITHUB_OUTPUT"
 
           ls -la target/bundled/*.zip
 
@@ -98,16 +106,9 @@ jobs:
           path: target/bundled/equilibrium-v*-win-vst3.zip
           if-no-files-found: error
 
-      - name: Upload Lucent
+      - name: Upload Lucent (+ Relay)
         uses: actions/upload-artifact@v6
         with:
           name: lucent-v${{ steps.bundle.outputs.lucent_version }}-win-vst3
           path: target/bundled/lucent-v*-win-vst3.zip
-          if-no-files-found: error
-
-      - name: Upload Lucent-Relay
-        uses: actions/upload-artifact@v6
-        with:
-          name: lucent-relay-v${{ steps.bundle.outputs.lucent_relay_version }}-win-vst3
-          path: target/bundled/lucent-relay-v*-win-vst3.zip
           if-no-files-found: error
