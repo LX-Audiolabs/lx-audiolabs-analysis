@@ -158,6 +158,7 @@ pub struct LucentRelayDspState {
     pub(crate) in0: Vec<f32>,
     pub(crate) in1: Vec<f32>,
     pub(crate) liveness: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) liveness_thread: Option<std::thread::JoinHandle<()>>,
     pub(crate) instance_key: usize,
 }
 
@@ -200,12 +201,23 @@ impl Default for LucentRelayDspState {
             in0: Vec::new(),
             in1: Vec::new(),
             liveness: None,
+            liveness_thread: None,
             instance_key: 0,
         }
     }
 }
 
 impl LucentRelayDspState {
+    fn stop_liveness_thread(&mut self) {
+        use std::sync::atomic::Ordering;
+        if let Some(alive) = self.liveness.take() {
+            alive.store(false, Ordering::Release);
+        }
+        if let Some(thread) = self.liveness_thread.take() {
+            let _ = thread.join();
+        }
+    }
+
     fn claim_slot(&mut self) {
         use std::sync::atomic::Ordering;
         if self.claimed_slot.is_none() {
@@ -233,14 +245,12 @@ impl LucentRelayDspState {
 
     fn spawn_liveness_thread(&mut self, params: &LucentRelayParams) {
         use std::sync::atomic::Ordering;
-        if let Some(alive) = self.liveness.take() {
-            alive.store(false, Ordering::Release);
-        }
+        self.stop_liveness_thread();
         let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
         self.liveness = Some(alive.clone());
         let ss = self.shm_state.clone();
         let live = params.live.clone();
-        std::thread::spawn(move || {
+        self.liveness_thread = Some(std::thread::spawn(move || {
             while alive.load(Ordering::Acquire) {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 let slot = ss.slot.load(Ordering::Acquire);
@@ -263,7 +273,7 @@ impl LucentRelayDspState {
                     }
                 }
             }
-        });
+        }));
     }
 
     /// Refresh `resolved_target` from the SHM consumer table — at most once
@@ -400,9 +410,7 @@ impl Drop for LucentRelayDspState {
     fn drop(&mut self) {
         use std::sync::atomic::Ordering;
         self.shm_state.slot.store(-1, Ordering::Release);
-        if let Some(alive) = self.liveness.take() {
-            alive.store(false, Ordering::Release);
-        }
+        self.stop_liveness_thread();
         if let Some(slot) = self.claimed_slot.take()
             && let Some(hub) = relay_hub()
         {

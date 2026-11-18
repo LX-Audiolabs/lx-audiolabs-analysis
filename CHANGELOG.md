@@ -8,6 +8,21 @@ unchanged), **major** = breaking.
 
 ---
 
+## 2026-11-18 — Lucent CLAP worker shutdown
+
+Lucent and Lucent Relay now stop and join their liveness worker before reset or
+plugin teardown completes. This prevents a worker from executing plugin code
+while the host unloads the CLAP library.
+
+| Plugin       | From  | To    | Kind  |
+|--------------|-------|-------|-------|
+| Lucent       | 1.2.7 | 1.2.8 | patch |
+| Lucent Relay | 1.1.6 | 1.1.7 | patch |
+
+Serial `clap-validator 0.4.2` run: all tests passed; scan-time warnings only.
+
+---
+
 ## 2026-11-06 — Catalog sync from lx-audiolabs-dev (AURA 0.14.1)
 
 Pulled shipping-plugin updates from the internal catalog. Stack stays crates.io.

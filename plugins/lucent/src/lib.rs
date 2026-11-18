@@ -968,6 +968,7 @@ pub struct LucentDspState {
     pub(crate) cached_name: String,
     pub(crate) cached_display_name: String,
     pub(crate) liveness: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) liveness_thread: Option<std::thread::JoinHandle<()>>,
     pub(crate) instance_key: usize,
     /// Envelope follower driving the goniometer's visual auto-gain — same
     /// pattern as Equilibrium/Meridian, so all three plugins' vectorscopes
@@ -979,6 +980,15 @@ pub struct LucentDspState {
 }
 
 impl LucentDspState {
+    fn stop_consumer_heartbeat(&mut self) {
+        if let Some(alive) = self.liveness.take() {
+            alive.store(false, Ordering::Release);
+        }
+        if let Some(thread) = self.liveness_thread.take() {
+            let _ = thread.join();
+        }
+    }
+
     pub(crate) fn build_fft() -> (Arc<dyn RealToComplex<f32>>, Vec<Complex<f32>>) {
         let fft_size = SPECTRUM_BINS * 2;
         let mut planner = RealFftPlanner::<f32>::new();
@@ -1032,14 +1042,12 @@ impl LucentDspState {
     }
 
     pub(crate) fn spawn_consumer_heartbeat(&mut self, params: &LucentParams) {
-        if let Some(alive) = self.liveness.take() {
-            alive.store(false, Ordering::Release);
-        }
+        self.stop_consumer_heartbeat();
         let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
         self.liveness = Some(alive.clone());
         let shared = params.shared.clone();
         let name_bg = params.name_bg.clone();
-        std::thread::spawn(move || {
+        self.liveness_thread = Some(std::thread::spawn(move || {
             while alive.load(Ordering::Acquire) {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 let slot = shared.shm.slot.load(Ordering::Acquire);
@@ -1052,7 +1060,7 @@ impl LucentDspState {
                     hub.write_consumer_name(slot as u8, &name, now_ms());
                 }
             }
-        });
+        }));
     }
 }
 
@@ -1097,6 +1105,7 @@ impl Default for LucentDspState {
             cached_name: String::new(),
             cached_display_name: String::new(),
             liveness: None,
+            liveness_thread: None,
             instance_key: 0,
             scope_vis_envelope: 1e-4,
             in0: Vec::new(),
@@ -1186,9 +1195,7 @@ impl PluginLogic for Lucent {
 
 impl Drop for LucentDspState {
     fn drop(&mut self) {
-        if let Some(alive) = self.liveness.take() {
-            alive.store(false, Ordering::Release);
-        }
+        self.stop_consumer_heartbeat();
         // Note: params.shared is not directly accessible here in 6.1.2 since
         // params lives outside DspState. The shell will clean up the shm_slot
         // via params when the plugin instance is torn down. We still clean up
