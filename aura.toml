@@ -1,7 +1,7 @@
 [vendor]
 name = "LX Audiolabs"
 id = "be.lxndr"
-url = "https://lx-audiolabs.github.io"
+url = "https://lx-audiolabs.dev"
 
 [[plugin]]
 name = "Lucent Relay"

@@ -22,3 +22,6 @@ skills-lock.json
 rustc-ice-*.txt
 wgpu-changelog-*.md
 pollster-releases.md
+
+# Local analysis notes / validator reports (not for upstream)
+.docs/
