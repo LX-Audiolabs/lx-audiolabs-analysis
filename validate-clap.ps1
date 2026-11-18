@@ -93,10 +93,10 @@ $failed = 0
 foreach ($clap in $resolved) {
     Write-Host ""
     Write-Host "=== $clap ===" -ForegroundColor Yellow
-    $args = @("validate", "-j", "$jobs", $clap)
-    if ($Include) { $args += @("-t", $Include) }
-    if ($OnlyFailed) { $args += "--only-failed" }
-    & clap-validator @args
+    $validatorArgs = @("validate", "-j", "$jobs", $clap)
+    if ($Include) { $validatorArgs += @("-t", $Include) }
+    if ($OnlyFailed) { $validatorArgs += "--only-failed" }
+    & clap-validator @validatorArgs
     if ($LASTEXITCODE -ne 0) {
         $failed++
         Write-Host "FAILED: $clap (exit $LASTEXITCODE)" -ForegroundColor Red
