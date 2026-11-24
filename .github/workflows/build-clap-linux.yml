@@ -1,0 +1,149 @@
+name: Build CLAP (Linux)
+
+on:
+  workflow_dispatch:
+
+# Build on ubuntu-22.04 so glibc stays ≤2.35 (ubuntu-latest links GLIBC_2.43+
+# and fails to dlopen on many desktop distros).
+# Do NOT cache target/ — partial restores leave stale fingerprints and cause
+# E0463 "can't find crate for slint". Registry cache is enough.
+
+jobs:
+  build-linux-clap:
+    name: Linux CLAP (all plugins)
+    runs-on: ubuntu-22.04
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: cc
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: linux-clap-jammy-registry-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml') }}
+          restore-keys: linux-clap-jammy-registry-
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y || sudo apt-get update -y || true
+          sudo apt-get install -y \
+            pkg-config \
+            libfreetype6-dev \
+            libfontconfig1-dev \
+            libgles2-mesa-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libegl-dev \
+            libgl-dev
+
+      - name: Build all plugins (CLAP)
+        run: |
+          set -euo pipefail
+          plugs=(aether meridian equilibrium lucent lucent-relay)
+          for p in "${plugs[@]}"; do
+            echo "=== cargo build -p $p (default = clap) ==="
+            cargo build --release --package "$p"
+          done
+
+      - name: Bundle CLAPs
+        id: bundle
+        run: |
+          set -euo pipefail
+          rm -rf target/bundled target/artifacts
+          mkdir -p target/bundled
+
+          pack() {
+            local so="$1" display="$2"
+            local src="target/release/${so}"
+            test -f "$src" || { echo "missing $src" >&2; exit 1; }
+            cp "$src" "target/bundled/${display}.clap"
+            echo "[OK] ${display}.clap"
+          }
+
+          stage() {
+            local art="$1"
+            shift
+            local dest="target/artifacts/${art}"
+            mkdir -p "$dest"
+            for name in "$@"; do
+              cp -a "target/bundled/${name}" "$dest/"
+            done
+          }
+
+          solos=(
+            "libaether.so|Aether|plugins/aether/Cargo.toml|aether"
+            "libmeridian.so|Meridian|plugins/meridian/Cargo.toml|meridian"
+            "libequilibrium.so|Equilibrium|plugins/equilibrium/Cargo.toml|equilibrium"
+          )
+          for row in "${solos[@]}"; do
+            IFS='|' read -r so display toml pkg <<< "$row"
+            version=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+            pack "$so" "$display"
+            stage "${pkg}-v${version}-lin-clap" "${display}.clap"
+            echo "${pkg}_version=${version}" >> "$GITHUB_OUTPUT"
+          done
+
+          lucent_ver=$(grep '^version' plugins/lucent/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          pack liblucent.so Lucent
+          pack liblucent_relay.so Lucent-Relay
+          stage "lucent-v${lucent_ver}-lin-clap" Lucent.clap Lucent-Relay.clap
+          echo "lucent_version=${lucent_ver}" >> "$GITHUB_OUTPUT"
+
+          # glibc sanity: jammy = 2.35. Fail if anything needs 2.36+.
+          if command -v objdump >/dev/null; then
+            bad=$(objdump -T target/release/libaether.so 2>/dev/null \
+              | grep -oE 'GLIBC_2\.[0-9]+' | sort -u \
+              | awk -F. '{ if ($2+0 >= 36) print }' || true)
+            if [[ -n "$bad" ]]; then
+              echo "ERROR: binary needs glibc newer than ubuntu-22.04:" >&2
+              echo "$bad" >&2
+              exit 1
+            fi
+            echo "glibc symbols OK (no GLIBC_2.36+)"
+            objdump -T target/release/libaether.so 2>/dev/null \
+              | grep -oE 'GLIBC_2\.[0-9]+' | sort -u | tail -5
+          fi
+
+          find target/artifacts -type f | sort
+
+      - name: Upload Aether
+        uses: actions/upload-artifact@v6
+        with:
+          name: aether-v${{ steps.bundle.outputs.aether_version }}-lin-clap
+          path: target/artifacts/aether-v${{ steps.bundle.outputs.aether_version }}-lin-clap
+          if-no-files-found: error
+
+      - name: Upload Meridian
+        uses: actions/upload-artifact@v6
+        with:
+          name: meridian-v${{ steps.bundle.outputs.meridian_version }}-lin-clap
+          path: target/artifacts/meridian-v${{ steps.bundle.outputs.meridian_version }}-lin-clap
+          if-no-files-found: error
+
+      - name: Upload Equilibrium
+        uses: actions/upload-artifact@v6
+        with:
+          name: equilibrium-v${{ steps.bundle.outputs.equilibrium_version }}-lin-clap
+          path: target/artifacts/equilibrium-v${{ steps.bundle.outputs.equilibrium_version }}-lin-clap
+          if-no-files-found: error
+
+      - name: Upload Lucent (+ Relay)
+        uses: actions/upload-artifact@v6
+        with:
+          name: lucent-v${{ steps.bundle.outputs.lucent_version }}-lin-clap
+          path: target/artifacts/lucent-v${{ steps.bundle.outputs.lucent_version }}-lin-clap
+          if-no-files-found: error
