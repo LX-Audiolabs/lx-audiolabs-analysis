@@ -7,7 +7,7 @@ on:
 jobs:
   build-linux:
     name: Linux (x86_64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     env:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: cc
     steps:
