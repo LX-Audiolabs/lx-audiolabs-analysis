@@ -1,7 +1,7 @@
 # LX Audiolabs — plugins
 
 [![License](https://img.shields.io/badge/license-GPL--3.0--or--later-blue.svg)](LICENSE)
-[![Slint](https://img.shields.io/badge/Slint-1.18.1-2379F4.svg)](https://slint.dev)
+[![Slint](https://img.shields.io/badge/Slint-1.19.0-2379F4.svg)](https://slint.dev)
 [![AURA](https://img.shields.io/badge/framework-AURA-6E40C9.svg)](https://github.com/LX-Audiolabs/aura)
 
 Official public product catalog for **LX Audiolabs**, built on **[AURA](https://github.com/LX-Audiolabs/aura)** (Slint UI + CLAP-first). Release CLAPs are built on **GitHub Actions**.
@@ -9,7 +9,7 @@ Official public product catalog for **LX Audiolabs**, built on **[AURA](https://
 | | |
 |--|--|
 | **License** | [GPL-3.0-or-later](./LICENSE) |
-| **Framework** | [AURA](https://github.com/LX-Audiolabs/aura) via crates.io (`lx-aura-*` 0.14.1) |
+| **Framework** | [AURA](https://github.com/LX-Audiolabs/aura) via crates.io (`lx-aura-*` 0.14.6) |
 | **Ship format** | **CLAP** (per-plugin Actions) · **Windows VST3** · **Linux LV2** |
 | **Other formats** | macOS VST3/LV2 not shipped (CLAP + Mac ad-hoc signing left out) |
 
@@ -51,8 +51,11 @@ Runtime GUI: **aura-editor** + **aura-baseview** (default FemtoVG / wgpu).
 ### Framework (AURA)
 
 Ship deps come from **crates.io** (`lx-aura`, `lx-aura-editor`, `lx-aura-dsp`,
-`lx-aura-build`, `lx-aura-test`, … — workspace pins **0.14.1**). Lib names stay
+`lx-aura-build`, `lx-aura-test`, … — workspace pins **0.14.6**). Lib names stay
 `aura::` / `aura_test::` / …
+
+The published AURA 0.14.6 includes the fractional-DPI rendering fix.
+Slint is pinned to 1.19.0; the editor uses FemtoVG/wgpu.
 
 `cargo-aura` / preview / host are **not** on crates.io yet — install from the
 AURA git tree when you need the CLI locally:

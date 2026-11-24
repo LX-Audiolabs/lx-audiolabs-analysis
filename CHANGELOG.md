@@ -8,6 +8,29 @@ unchanged), **major** = breaking.
 
 ---
 
+## 2026-11-24 — Windows CLAP HiDPI rendering
+
+Aether, Equilibrium and Meridian now render at fractional Windows display scales,
+including 125% in REAPER. AURA rounded physical window dimensions while Slint
+truncated them, leaving the wgpu surface with a different size.
+
+- AURA dependencies updated to crates.io 0.14.6, including the HiDPI fix.
+- Slint updated to 1.19.0; baseview updated to 0.4.2.
+- FemtoVG/wgpu stays enabled. No local source override is needed.
+
+| Plugin      | From   | To     | Kind  |
+|-------------|--------|--------|-------|
+| Aether      | 1.4.7  | 1.4.8  | patch |
+| Equilibrium | 1.8.7  | 1.8.8  | patch |
+| Meridian    | 1.11.7 | 1.11.8 | patch |
+
+Validation: workspace check with all format features passed. Serial CLAP validation
+reported 94 passed, 0 failed, 2 scan-time warnings and 36 skipped tests. All three
+Windows CLAP UIs rendered in REAPER at 125% display scaling. ZIP contents were
+verified against the tested binaries.
+
+---
+
 ## 2026-11-18 — Lucent CLAP worker shutdown
 
 Lucent and Lucent Relay now stop and join their liveness worker before reset or
